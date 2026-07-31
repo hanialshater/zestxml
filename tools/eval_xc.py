@@ -3,9 +3,11 @@
     python tools/eval_xc.py Results/<dataset>/score_mat.bin GZXML-Datasets/<dataset>
 
 Reports P@k and nDCG@k, propensity scored PSP@k (same propensity model as
-``ips_weight`` in ``Source/helper.cpp``), and -- when the dataset carries an
-``unseen_labels.txt`` -- the same numbers restricted to labels that had no training
-point, which is the number the generalized zero-shot setting is actually about.
+``ips_weight`` in ``Source/helper.cpp``), and the same numbers restricted to labels that
+had no training point, which is what the generalized zero-shot setting is actually about.
+Unseen labels are read from ``unseen_labels.txt`` when the dataset ships one and derived
+from ``trn_X_Y`` otherwise. A ``pos_trn_tst.txt`` filter matrix, if present, is applied
+first, as ``metrics.py`` does.
 """
 
 import os
@@ -55,6 +57,20 @@ def evaluate(scores, truth, inv_prop, ks=(1, 3, 5), label_mask=None):
     return out
 
 
+def unseen_labels(data_dir, trn, n_labels):
+    """Labels with no training point, from the dataset's own file or derived."""
+    unseen = torch.zeros(n_labels, dtype=torch.bool)
+    path = f"{data_dir}/unseen_labels.txt"
+    if os.path.exists(path):
+        with open(path) as f:
+            for line in f:
+                if line.strip():
+                    unseen[int(line.split()[0])] = True
+        return unseen
+    freq = torch.zeros(n_labels).index_add_(0, trn.indices, torch.ones(trn.nnz))
+    return freq == 0
+
+
 def main(score_path, data_dir):
     truth = read_text_smat(f"{data_dir}/tst_X_Y.txt")
     trn = read_text_smat(f"{data_dir}/trn_X_Y.txt")
@@ -62,18 +78,22 @@ def main(score_path, data_dir):
     assert scores.shape == truth.shape, f"{scores.shape} != {truth.shape}"
 
     dense_scores, dense_truth = scores.to_dense(), (truth.to_dense() > 0).float()
+
+    # metrics.py drops the pairs listed in this file before scoring; do the same
+    filter_path = f"{data_dir}/pos_trn_tst.txt"
+    if os.path.exists(filter_path):
+        drop = read_text_smat(filter_path)
+        dense_scores[drop.row_ids(), drop.indices] = 0.0
+        print(f"applied filter matrix {filter_path} ({drop.nnz} pairs)")
+
     inv_prop = inv_propensity(trn)
+    unseen = unseen_labels(data_dir, trn, truth.ncols)
 
     rows = [("all labels", evaluate(dense_scores, dense_truth, inv_prop))]
-    unseen_file = f"{data_dir}/unseen_labels.txt"
-    if os.path.exists(unseen_file):
-        unseen = torch.zeros(truth.ncols, dtype=torch.bool)
-        with open(unseen_file) as f:
-            for line in f:
-                if line.strip():
-                    unseen[int(line.split()[0])] = True
+    if 0 < int(unseen.sum()) < truth.ncols:
         rows.append(("unseen only", evaluate(dense_scores, dense_truth, inv_prop, label_mask=unseen)))
         rows.append(("seen only", evaluate(dense_scores, dense_truth, inv_prop, label_mask=~unseen)))
+    print(f"{int(unseen.sum())}/{truth.ncols} labels have no training point")
 
     cols = ["P@1", "P@3", "P@5", "nDCG@5", "PSP@1", "PSP@3", "PSP@5"]
     print(f"{score_path}")

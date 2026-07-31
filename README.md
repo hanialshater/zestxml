@@ -98,6 +98,21 @@ Flags kept for compatibility but inert: `-F` (only used by the approximate short
 because `create_Xf_Yf_map` binarises `trn_X_Y` after `ips_weight` has written to it.
 `-bilinear_add_bias 1` is rejected rather than silently ignored; no run script uses it.
 
+### Benchmarking on a GPU
+`colab/ZestXML_A100_benchmark.ipynb` runs both implementations on **GZ-Eurlex-4.3K** with
+identical hyper-parameters and reports P@k / nDCG@k / PSP@k, wall time and peak GPU
+memory. The same thing from a shell:
+
+```shell
+bash tools/colab_benchmark.sh GZ-Eurlex-4.3K          # both implementations
+bash tools/colab_benchmark.sh GZ-Eurlex-4.3K torch    # skip the C++ baseline
+```
+
+It downloads the dataset, builds `./run`, trains and predicts with both, and evaluates
+them. Every stage is chunked, so an out-of-memory failure is a knob rather than a wall:
+lower `-max_elems` (non-zeros expanded per batch), `-dense_elems` (entries in a dense
+working block) or `-batch_size`.
+
 ### Validating on a real dataset
 The public GZXML datasets are large Google Drive downloads. For a quick end-to-end check
 on real text, `tools/make_reuters.py` builds one from Reuters-21578, whose topics are

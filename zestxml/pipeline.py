@@ -299,13 +299,19 @@ def main(argv=None) -> int:
     kind = params.str("type")
     device = resolve_device(params)
     log("running : %s on %s" % (kind, device))
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
 
+    started = time.time()
     if kind in ("xhtp_approx", "train", "all"):
         run_xhtp_approx(params)
     if kind in ("xhtp_fine_tune", "train", "all"):
         run_xhtp_fine_tune(params)
     if kind in ("predict", "all"):
         run_predict(params)
+    log("[STAT] total wall time : %.1f s" % (time.time() - started))
+    if device.type == "cuda":
+        log("[STAT] peak GPU memory : %.2f GiB" % (torch.cuda.max_memory_allocated(device) / 2**30))
     if kind not in ("xhtp_approx", "xhtp_fine_tune", "train", "predict", "all"):
         sys.stderr.write("unknown -type '%s'\n" % kind)
         return 1
