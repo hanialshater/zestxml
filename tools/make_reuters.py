@@ -86,14 +86,13 @@ def build(out_dir):
     for i, name in enumerate(labels):
         toks = [t for t in name.replace("-", " ").split() if t]
         cells = {feat("__label__%d__%s" % (i, name)): 1.0}
-        for t in toks:  # tokens of the topic name, and the whole name as a phrase
-            if t in xf_set:
-                cells[feat("1_" + t)] = 1.0
-                has_text[i] = True
+        for t in toks:  # every token of the name becomes a label feature, matched or not
+            cells[feat("1_" + t)] = 1.0
+            has_text[i] = has_text[i] or t in xf_set
         phrase = " ".join(toks)
-        if len(toks) > 1 and phrase in xf_set:
+        if len(toks) > 1:
             cells[feat("1_" + phrase)] = 1.0
-            has_text[i] = True
+            has_text[i] = has_text[i] or phrase in xf_set
         Y_Yf_rows[i] = sorted(cells.items())
     linked = sum(has_text)
 

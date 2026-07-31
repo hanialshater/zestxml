@@ -141,14 +141,13 @@ def build(out_dir, packages, seed=0):
         cells = {feat("__label__%d__%s" % (i, name)): 1.0}
         toks = TOKEN.findall(name)
         hit = False
-        for t in toks:
-            if t in xf_set:
-                cells[feat("1_" + t)] = 1.0
-                hit = True
+        for t in toks:  # every token of the keyword becomes a label feature, matched or not
+            cells[feat("1_" + t)] = 1.0
+            hit = hit or t in xf_set
         phrase = " ".join(toks)
-        if len(toks) > 1 and phrase in xf_set:
+        if len(toks) > 1:
             cells[feat("1_" + phrase)] = 1.0
-            hit = True
+            hit = hit or phrase in xf_set
         Y_Yf_rows.append(sorted(cells.items()))
         has_text.append(hit)
 

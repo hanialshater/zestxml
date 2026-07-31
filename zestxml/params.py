@@ -24,6 +24,11 @@ DEFAULTS: Dict[str, str] = {
     "bs_alpha": "0.2",
     "bs_direct_wt": "0.2",
     "sparsity_pattern_file": "-",
+    "direct_map": "exact",  # exact | charngram | vectors
+    "direct_fallback": "1",  # fuzzy-match only label features with no exact match
+    "direct_topk": "3",  # fuzzy links kept per label feature
+    "direct_min_sim": "0.5",  # cosine floor for a fuzzy link
+    "direct_vectors": "-",  # word2vec/GloVe/fastText text file for -direct_map vectors
     # ---- shortlist -----------------------------------------------------------
     "shortyK": "100",
     "F": "10",

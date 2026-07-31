@@ -76,12 +76,38 @@ def _jaccard_topk(
     return CSR.from_sorted_keys(torch.cat(keys_out), torch.cat(vals_out), (left.nrows, ncols))
 
 
-def direct_map(Xf: List[str], Yf: List[str], weight: float, device=None, dtype=torch.float32) -> CSR:
+def _query_name(name: str) -> str:
+    """The part of a label-feature name that is looked up in the point vocabulary.
+
+    Label features carry a prefix up to the first underscore; whatever follows is the
+    lookup key. Names without an underscore are matched whole, which is what the C++
+    ``substr(npos + 1)`` does.
+    """
+    return name[name.find("_") + 1 :]
+
+
+def _is_token_feature(query: str) -> bool:
+    """Whether a label feature names a token rather than a label.
+
+    The per-label ``__label__<i>__<name>`` features strip to ``_label__<i>__<name>``,
+    which never matches anything exactly; under fuzzy matching they would match plenty of
+    nonsense, so they are excluded from the similarity search.
+    """
+    return bool(query) and not query.startswith("_") and "__" not in query
+
+
+def direct_map(
+    Xf: List[str], Yf: List[str], weight: float, device=None, dtype=torch.float32,
+    mode: str = "exact", topk: int = 3, min_sim: float = 0.5, vectors: Optional[str] = None,
+    fallback_only: bool = True,
+    max_elems: int = 1 << 26, dense_elems: int = 1 << 24, log=print,
+) -> CSR:
     """``create_Xf_Yf_map_direct``: link ``yf`` to the point feature it is named after.
 
-    Label features carry a prefix up to the first underscore; whatever follows is looked
-    up in the point-feature vocabulary. Features without an underscore are matched whole,
-    which is what the C++ ``substr(npos + 1)`` does.
+    With ``mode='exact'`` this is the reference behaviour. Otherwise each token-like label
+    feature also links to its ``topk`` nearest point features under
+    :mod:`zestxml.embed`, weighted by ``weight * cosine`` so a loose match counts for
+    less than an exact one.
     """
     xf_index: Dict[str, int] = {}
     for i, name in enumerate(Xf):
@@ -90,17 +116,55 @@ def direct_map(Xf: List[str], Yf: List[str], weight: float, device=None, dtype=t
     rows: List[int] = []
     cols: List[int] = []
     for j, name in enumerate(Yf):
-        i = xf_index.get(name[name.find("_") + 1 :])
+        i = xf_index.get(_query_name(name))
         if i is not None:
             rows.append(i)
             cols.append(j)
 
-    return CSR.from_coo(
+    exact = CSR.from_coo(
         torch.tensor(rows, dtype=torch.long, device=device),
         torch.tensor(cols, dtype=torch.long, device=device),
         torch.full((len(rows),), weight, dtype=dtype, device=device),
         (len(Xf), len(Yf)),
     )
+    if mode == "exact":
+        return exact
+
+    from .embed import similar_names
+
+    queries = [_query_name(name) for name in Yf]
+    keep = [j for j, q in enumerate(queries) if _is_token_feature(q)]
+    if fallback_only:
+        # an exact match is high precision; only look for neighbours when there is none
+        matched = set(cols)
+        keep = [j for j in keep if j not in matched]
+    log(f"fuzzy direct map ({mode}, {'fallback' if fallback_only else 'augment'}): "
+        f"{len(keep)}/{len(Yf)} label features, top {topk} above {min_sim}")
+    if not keep:
+        return exact
+    sims = similar_names(
+        [queries[j] for j in keep], Xf, mode, topk=topk, min_sim=min_sim, vectors=vectors,
+        device=device, dtype=dtype, max_elems=max_elems, dense_elems=dense_elems,
+    )
+
+    keep_t = torch.tensor(keep, dtype=torch.long, device=device)
+    fuzzy_rows = sims.indices  # point features
+    fuzzy_cols = keep_t[sims.row_ids()]  # label features
+    fuzzy_vals = sims.values * weight
+
+    # one link per pair: an exact match always outranks a fuzzy one of the same pair
+    all_rows = torch.cat([exact.row_ids(), fuzzy_rows])
+    all_cols = torch.cat([exact.indices, fuzzy_cols])
+    all_vals = torch.cat([exact.values, fuzzy_vals])
+    keys = all_rows * len(Yf) + all_cols
+    order = torch.argsort(keys)
+    keys, all_vals = keys[order], all_vals[order]
+    uniq, inv = torch.unique(keys, return_inverse=True)
+    best = torch.zeros(uniq.numel(), dtype=dtype, device=device).scatter_reduce(
+        0, inv, all_vals, reduce="amax", include_self=False
+    )
+    log(f"fuzzy direct map: {exact.nnz} exact + {uniq.numel() - exact.nnz} new links")
+    return CSR.from_sorted_keys(uniq, best, (len(Xf), len(Yf)))
 
 
 def add_matrices(a: CSR, b: CSR) -> CSR:
@@ -153,6 +217,11 @@ def build_sparsity_pattern(
     bs_alpha: float = 0.2,
     bs_threshold: float = 0.0,
     bs_direct_wt: float = 0.2,
+    direct_map_mode: str = "exact",
+    direct_topk: int = 3,
+    direct_min_sim: float = 0.5,
+    direct_vectors: Optional[str] = None,
+    direct_fallback: bool = True,
     max_elems: int = 1 << 26,
     dense_elems: int = 1 << 25,
     log=print,
@@ -190,7 +259,11 @@ def build_sparsity_pattern(
     direct: Optional[CSR] = None
     if bs_direct_wt > 0:
         log("adding direct Xf-Yf matches...")
-        direct = direct_map(Xf, Yf, bs_direct_wt, device=Xf_Yf.device, dtype=Xf_Yf.values.dtype)
+        direct = direct_map(
+            Xf, Yf, bs_direct_wt, device=Xf_Yf.device, dtype=Xf_Yf.values.dtype,
+            mode=direct_map_mode, topk=direct_topk, min_sim=direct_min_sim,
+            vectors=direct_vectors, fallback_only=direct_fallback, max_elems=max_elems, dense_elems=dense_elems, log=log,
+        )
         Xf_Yf = add_matrices(Xf_Yf, direct)
 
     Yf_Xf = remove_duplicates(Yf_Xf, Xf_Yf)

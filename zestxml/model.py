@@ -408,7 +408,10 @@ def direct_scores(direct: CSR, X: CSR, Y: CSR, pairs: CSR, max_elems: int) -> Te
 
     ``predict`` in the C++ builds this from ``direct_Xf_Yf`` with all values set to 1.
     """
-    pattern = BilinearPattern.from_csr(direct.binarize())
+    # the C++ sets every direct weight to 1; scaling by the max reproduces that for an
+    # exact map and keeps fuzzy links proportional to their similarity
+    scale = float(direct.values.abs().max()) if direct.nnz else 1.0
+    pattern = BilinearPattern.from_csr(direct.with_values(direct.values / max(scale, 1e-12)))
     clf = BilinearClassifier(pattern, device=X.device, dtype=X.values.dtype)
     clf.weights = torch.ones(1, dtype=X.values.dtype, device=X.device)
     clf.bias = torch.zeros(1, dtype=X.values.dtype, device=X.device)

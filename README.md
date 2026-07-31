@@ -98,6 +98,40 @@ Flags kept for compatibility but inert: `-F` (only used by the approximate short
 because `create_Xf_Yf_map` binarises `trn_X_Y` after `ips_weight` has written to it.
 `-bilinear_add_bias 1` is rejected rather than silently ignored; no run script uses it.
 
+### Fuzzy label-to-document matching (off by default)
+The direct map is the only bridge an unseen label has to the document vocabulary, and in
+the reference it is *string equality*: `acq` never reaches `acquisition`. `-direct_map`
+replaces equality with a similarity search over feature names:
+
+```shell
+-direct_map charngram                      # tf-idf over character n-grams, no downloads
+-direct_map vectors -direct_vectors w2v.txt  # cosine in a word2vec/GloVe/fastText space
+-direct_topk 3 -direct_min_sim 0.5 -direct_fallback 1
+```
+
+Links are weighted by `bs_direct_wt * cosine`, so a loose match counts for less than an
+exact one, and `-direct_fallback 1` (the default) only searches for label features that
+have no exact match, leaving correct matches undiluted.
+
+**The character n-gram mode did not pay off on either dataset, and it is worth knowing
+why.** On npm, augmenting exact matches *cost* 4.3 points of unseen-label P@1
+(51.65 -> 47.33); restricted to gaps it was neutral (52.11 -> 51.76), as it was on Reuters
+(61.28 both ways). Inspecting what it retrieves explains it:
+
+```
+acq     -> cyacq(0.34), lt cyacq(0.27), provide cyacq(0.22), acquire(0.22)
+bop     -> prop(0.11), crop(0.11), drop(0.11), stop(0.10)
+housing -> housing(1.00), housing corp(0.70), housing starts(0.61), warehousing(0.60)
+```
+
+Character n-grams capture *morphology*, which exact matching mostly covers already, and
+they are actively wrong on *abbreviations*, which is where the real gap is: `acquire`
+ranks below the junk match `cyacq`, and `bop` retrieves words that merely rhyme. The
+labels that need help need **semantics**, not spelling — which is the `vectors` mode, or
+an encoder. That path is implemented but untested here, because the hosts serving
+pretrained vectors are blocked from this sandbox; supply any word2vec-format file and it
+runs.
+
 ### Benchmarking on a GPU
 `colab/ZestXML_A100_benchmark.ipynb` runs both implementations on **GZ-Eurlex-4.3K** with
 identical hyper-parameters and reports P@k / nDCG@k / PSP@k, wall time and peak GPU

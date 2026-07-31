@@ -82,6 +82,38 @@ def test_direct_map_prefix_rule():
     assert torch.allclose(mat.values, torch.full((2,), 0.8))
 
 
+def test_char_ngram_similarity_ranks_exact_match_first():
+    from zestxml.embed import char_ngram_matrices, topk_cosine_sparse
+
+    targets = ["housing", "housing starts", "warehousing", "unrelated"]
+    left, right = char_ngram_matrices(["housing"], targets)
+    sims = topk_cosine_sparse(left, right, topk=3, min_sim=0.1)
+    best = sims.indices[sims.values.argmax()].item()
+    assert targets[best] == "housing"
+    assert abs(sims.values.max().item() - 1.0) < 1e-5
+
+
+def test_direct_map_fuzzy_fills_gaps_without_touching_exact_matches():
+    Xf = ["housing", "acquire", "unrelated"]
+    Yf = ["1_housing", "1_housings", "__label__0__x"]
+
+    exact = direct_map(Xf, Yf, 0.8)
+    assert exact.nnz == 1  # only "1_housing" matches a point feature by name
+
+    fuzzy = direct_map(Xf, Yf, 0.8, mode="charngram", topk=2, min_sim=0.3, log=lambda *a: None)
+    pairs = dict(zip(zip(fuzzy.row_ids().tolist(), fuzzy.indices.tolist()), fuzzy.values.tolist()))
+    assert pairs[(0, 0)] == pytest.approx(0.8)  # the exact link keeps full weight
+    assert (0, 1) in pairs and pairs[(0, 1)] < 0.8  # "1_housings" reached "housing", discounted
+    assert not any(col == 2 for _, col in pairs)  # per-label features are never fuzzy matched
+
+
+def test_direct_map_fallback_only_adds_nothing_when_everything_matches():
+    Xf = ["housing", "acquire"]
+    Yf = ["1_housing"]
+    fuzzy = direct_map(Xf, Yf, 0.8, mode="charngram", topk=2, min_sim=0.1, log=lambda *a: None)
+    assert fuzzy.nnz == 1 and fuzzy.values.tolist() == [pytest.approx(0.8)]
+
+
 def test_binary_io_roundtrip(tmp_path):
     mat, _ = random_csr(23, 13, seed=5)
     path = str(tmp_path / "m.bin")
