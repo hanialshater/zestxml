@@ -198,6 +198,7 @@ def run_xhtp_fine_tune(params: Params) -> None:
             targets,
             epochs=params.int("bilinear_classifier_maxitr"),
             lr=params.float("lr"),
+            batch_size=params.int("batch_size"),
             max_elems=params.int("max_elems"),
             seed=params.int("seed"),
             log=log,

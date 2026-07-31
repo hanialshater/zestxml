@@ -72,8 +72,12 @@ one vector over that pattern's non-zeros. Three differences are deliberate:
   (`-bilinear_classifier_kind 0`) or logistic (`1`) loss, is minimised with Adam. The
   linear form is never materialised: scores contract the three sparse operands directly
   through a sorted-key join, so peak memory depends on the batch rather than on the
-  label or feature count. `-bilinear_classifier_maxitr` is the epoch count and `-lr`
-  sets the step size.
+  label or feature count. `-bilinear_classifier_maxitr` is the epoch count, `-batch_size`
+  the points per gradient step, and `-lr` the step size (linearly decayed to 0 over
+  training). Each epoch prints the objective, which is directly comparable to the
+  reference: on the synthetic dataset the defaults reach 43270 against dual coordinate
+  descent's 43303, with the same train accuracy to within half a point. Raise `-lr` or
+  `-bilinear_classifier_maxitr` if the printed objective is still falling at the end.
 * **Shortlisting** is exact. `get_approx_shortlist` walks an inverted index with a
   shrinking threshold to approximate the top-`shortyK` labels; the port computes
   `X_Xf @ sparsity_pattern @ Y_Yf^T` in chunks and takes an exact top-k, which can only
@@ -82,8 +86,8 @@ one vector over that pattern's non-zeros. Three differences are deliberate:
   per batch and `-dense_elems` the size of any dense working block. Lower them if you run
   out of memory, raise them for throughput.
 
-Extra flags: `-device auto|cpu|cuda[:n]`, `-lr`, `-seed`, `-max_elems`, `-dense_elems`,
-`-float64`. `-num_thread 0` lets torch pick its own thread count.
+Extra flags: `-device auto|cpu|cuda[:n]`, `-lr`, `-batch_size`, `-seed`, `-max_elems`,
+`-dense_elems`, `-float64`. `-num_thread 0` lets torch pick its own thread count.
 
 One more consistency fix: with `-bilinear_normalize 1` the C++ divides the linear-form
 features by their norm while training but not while predicting; this port applies the
@@ -100,9 +104,15 @@ pytest tests -v
 ```
 `tests/test_units.py` checks every sparse primitive against a dense reference.
 `tests/test_cpp_parity.py` builds `./run`, runs it on a synthetic dataset, and asserts
-that the mined pattern matches entry for entry and that the C++ model, scored by this
-implementation, reproduces the C++ `bilinear_score_mat` / `knn_score_mat` / `score_mat`.
-It is skipped when no compiler is available.
+that the mined pattern matches entry for entry, that the C++ model scored by this
+implementation reproduces the C++ `bilinear_score_mat` / `knn_score_mat` / `score_mat`,
+that the exact shortlist recalls at least as much as the approximate one, and that a
+pattern mined here loads back into the C++ binary. It is skipped when no compiler is
+available.
+
+The remaining gap is a benchmark run on the real datasets: the numbers above come from
+synthetic data, which has no signal to learn, so it validates agreement rather than
+accuracy.
 
 ### Two reference behaviours this port does not reproduce
 Both were found while diffing against `./run` on synthetic data, and both are bugs rather

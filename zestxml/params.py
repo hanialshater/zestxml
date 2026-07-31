@@ -41,7 +41,8 @@ DEFAULTS: Dict[str, str] = {
     # ---- torch specific ------------------------------------------------------
     "device": "auto",  # auto | cpu | cuda | cuda:0 | ...
     "num_thread": "1",  # 0 -> let torch decide
-    "lr": "0.05",  # Adam step size for the bilinear classifier
+    "lr": "0.2",  # Adam step size for the bilinear classifier
+    "batch_size": "256",  # points per gradient step
     "seed": "0",
     "max_elems": str(1 << 24),  # cap on non-zeros expanded per batch
     "dense_elems": str(1 << 24),  # cap on entries of a dense working block

@@ -22,21 +22,14 @@ Two feature-pair scores are combined:
 
 from __future__ import annotations
 
-from typing import Dict, Iterator, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
 from torch import Tensor
 
-from .csr import CSR, cost_chunks, prod_dense_rows, row_costs, spspmm, topk_per_row_dense
+from .csr import CSR, bounded_chunks, prod_dense_rows, row_costs, spspmm, topk_per_row_dense
 
 GOOD_TH = 100.0  # prod_for_jaccard keeps entries above this on top of the top-k
-
-
-def _bounded_chunks(costs: Tensor, max_elems: int, max_rows: int) -> Iterator[Tuple[int, int]]:
-    """Row blocks small enough for both the expansion and the dense block it fills."""
-    for lo, hi in cost_chunks(costs, max_elems):
-        for sub in range(lo, hi, max_rows):
-            yield sub, min(sub + max_rows, hi)
 
 
 def _jaccard_topk(
@@ -59,7 +52,7 @@ def _jaccard_topk(
     keys_out: List[Tensor] = []
     vals_out: List[Tensor] = []
 
-    for lo, hi in _bounded_chunks(costs, max_elems, max_rows):
+    for lo, hi in bounded_chunks(costs, max_elems, max_rows):
         rows = torch.arange(lo, hi, device=left.device)
         block = prod_dense_rows(left, right, rows)
         denom = alpha * (row_freq[lo:hi, None] + col_freq[None, :] - block) + (1.0 - alpha) * (

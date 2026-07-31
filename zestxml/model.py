@@ -27,6 +27,7 @@ from torch import Tensor
 
 from .csr import (
     CSR,
+    bounded_chunks,
     cost_chunks,
     counts_to_indptr,
     prod_dense_rows,
@@ -157,10 +158,10 @@ def pair_scores(
     return out.index_add(0, l_pair, acc[cell_of] * l_val)
 
 
-def batch_points(X: CSR, pattern: BilinearPattern, order: Tensor, max_elems: int):
-    """Yield point batches whose pattern expansion stays under ``max_elems``."""
+def batch_points(X: CSR, pattern: BilinearPattern, order: Tensor, max_elems: int, batch_size=None):
+    """Yield point batches, capped by expansion cost and optionally by point count."""
     costs = row_costs_from_counts(X, pattern.row_counts())[order]
-    for lo, hi in cost_chunks(costs, max_elems):
+    for lo, hi in bounded_chunks(costs, max_elems, batch_size):
         yield order[lo:hi]
 
 
@@ -339,7 +340,8 @@ class BilinearClassifier:
         pairs: CSR,
         targets: Tensor,
         epochs: int = 20,
-        lr: float = 0.05,
+        lr: float = 0.2,
+        batch_size: int = 256,
         max_elems: int = 1 << 24,
         seed: int = 0,
         log=print,
@@ -361,7 +363,7 @@ class BilinearClassifier:
                 group["lr"] = lr * (1.0 - epoch / max(1, epochs))
             order = torch.randperm(X.nrows, generator=generator).to(device)
             total, seen = 0.0, 0
-            for points in batch_points(X, self.pattern, order, max_elems):
+            for points in batch_points(X, self.pattern, order, max_elems, batch_size):
                 margin, pos = self.score_pairs(X, Y, pairs, points, norms)
                 if margin.numel() == 0:
                     continue

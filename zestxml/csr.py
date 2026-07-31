@@ -212,6 +212,16 @@ def cost_chunks(costs: Tensor, max_elems: int) -> Iterator[Tuple[int, int]]:
         lo = hi
 
 
+def bounded_chunks(costs: Tensor, max_elems: int, max_rows: Optional[int] = None) -> Iterator[Tuple[int, int]]:
+    """``cost_chunks`` with an additional cap on the number of rows per block."""
+    for lo, hi in cost_chunks(costs, max_elems):
+        if max_rows is None:
+            yield lo, hi
+            continue
+        for sub in range(lo, hi, max_rows):
+            yield sub, min(sub + max_rows, hi)
+
+
 def expand_two_hop(a: CSR, b: CSR, rows: Tensor):
     """Non-zeros of ``a[rows] @ b`` before accumulation.
 

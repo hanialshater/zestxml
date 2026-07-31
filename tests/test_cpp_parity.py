@@ -166,7 +166,7 @@ def test_sparsity_pattern_matches_cpp(cpp_run):
     )
 
 
-def cpp_dropped_pairs(X: CSR, Y: CSR, W_dense, pairs: CSR):
+def cpp_dropped_pairs(X: CSR, Y: CSR, W_dense, support, pairs: CSR):
     """Pairs the C++ scores wrong because of the zero sentinel in ``prod_helper``.
 
     ``prod_helper`` (``Source/mat.h``) records an accumulator slot with
@@ -186,7 +186,8 @@ def cpp_dropped_pairs(X: CSR, Y: CSR, W_dense, pairs: CSR):
             continue
         feats, _ = torch.sort(feats)  # the C++ scans a point's features in index order
         contrib = W_dense[feats] * Xd[point, feats][:, None]
-        touched = contrib != 0
+        # a slot is touched wherever the *pattern* has a cell, even if its weight is zero
+        touched = support[feats]
         prefix = torch.cat([torch.zeros(1, contrib.shape[1]), contrib.cumsum(0)[:-1]])
         first = torch.where(touched.any(0), touched.float().argmax(0), torch.zeros(1, dtype=torch.long))
         pos = torch.arange(feats.numel())[:, None]
@@ -214,7 +215,8 @@ def test_weight_vector_layout_matches_cpp(cpp_run):
 
     bilinear = clf.score_matrix(tst_X_Xf, Y_Yf, shortlist, MAX_ELEMS, transform=True)
     want = read_bin_smat(f"{CPP_RES}/bilinear_score_mat.bin")
-    dropped = cpp_dropped_pairs(tst_X_Xf, Y_Yf, pattern.as_csr(clf.weights).to_dense(), shortlist)
+    support = pattern.as_csr(torch.ones(pattern.size)).to_dense() != 0
+    dropped = cpp_dropped_pairs(tst_X_Xf, Y_Yf, pattern.as_csr(clf.weights).to_dense(), support, shortlist)
     assert dropped.float().mean() < 0.01, "the reference dropped an implausible number of pairs"
     print(f"\n{int(dropped.sum())}/{shortlist.nnz} pairs hit the C++ prod_helper zero sentinel")
 
