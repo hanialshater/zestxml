@@ -132,13 +132,36 @@ hyper-parameters, same data, C++ against this port:
 | seen only, PyTorch | **95.19** | **36.70** | **22.75** | **97.15** | 86.12 | **93.80** |
 
 Labels with no training example are retrieved at 59.96 P@1 purely from their text, which
-is the behaviour the method exists for. On seen labels the two implementations are within
-noise of each other; the gain on unseen labels and on the propensity scored metrics comes
-from the exact shortlist and from the classifier reaching a lower objective.
+is the behaviour the method exists for.
 
-On this dataset the C++ takes 4.9s and this port 20s on 4 CPU threads: the sparse joins
-are written for GPU throughput and carry per-kernel overhead that a small CPU run does
-not amortise. Add `-device cuda` on a GPU box.
+Reuters only has 90 labels, so `tools/make_npm.py` builds a second, larger dataset with
+the same structure: npm package descriptions tagged with their keywords, which is the
+same shape of problem as the paper's GZ-Amazon (tag an item from a long tail of textual
+tags). 25127/8376 points, **3223 labels** of which 286 unseen, 4.9 tags per test point,
+19.6% of test positives on unseen labels.
+
+```shell
+python tools/make_npm.py GZXML-Datasets/GZ-NPM --cache npm_packages.jsonl
+```
+
+| 3223 labels | P@1 | P@3 | P@5 | nDCG@5 | PSP@1 | PSP@5 |
+| --- | --- | --- | --- | --- | --- | --- |
+| all labels, C++ | **73.82** | **53.00** | **40.72** | **60.34** | **19.19** | 27.99 |
+| all labels, PyTorch | 73.02 | 52.64 | 40.65 | 60.08 | 19.09 | **28.54** |
+| unseen only, C++ | 50.69 | 27.47 | **17.94** | 54.87 | 50.69 | **56.17** |
+| unseen only, PyTorch | **51.65** | **27.54** | 17.93 | **55.19** | **51.65** | 56.16 |
+
+Here the two are a wash: the C++ is ~0.8 P@1 ahead on head labels, this port ~1 point
+ahead on labels it has never seen. That is not a defect on either side -- both optimisers
+reach the same primal objective (462095 against 462297, 0.04% apart) but land at
+different points in it, the C++ with more regularisation (reg 150695, data loss 311399)
+and this port with a closer fit (reg 190906, data loss 271391). Training for fewer epochs
+moves it less than a tenth of a point, so it is where the optimum sits, not how long it
+is trained. Lower `-bilinear_classifier_cost` if you want the reference's balance.
+
+The C++ is still faster on CPU: 4.9s against 20s on Reuters, 23s against 52s on the npm
+dataset, on 4 threads. The sparse joins are written for GPU throughput and carry
+per-kernel overhead a CPU run does not amortise. Add `-device cuda` on a GPU box.
 
 ### Tests
 ```shell
