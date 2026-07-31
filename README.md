@@ -113,10 +113,26 @@ Links are weighted by `bs_direct_wt * cosine`, so a loose match counts for less 
 exact one, and `-direct_fallback 1` (the default) only searches for label features that
 have no exact match, leaving correct matches undiluted.
 
-**The character n-gram mode did not pay off on either dataset, and it is worth knowing
-why.** On npm, augmenting exact matches *cost* 4.3 points of unseen-label P@1
-(51.65 -> 47.33); restricted to gaps it was neutral (52.11 -> 51.76), as it was on Reuters
-(61.28 both ways). Inspecting what it retrieves explains it:
+**Results are mixed, and the pattern is instructive.** Unseen-label P@1:
+
+| direct map | Reuters (97% vector coverage) | npm (77% coverage) |
+| --- | --- | --- |
+| `exact` (reference) | 61.28 | **52.11** |
+| `charngram`, fallback | 61.28 | 51.76 |
+| `charngram`, augment | 60.90 | 47.33 |
+| `vectors` GloVe-100, fallback | **66.35** | 50.88 |
+| `vectors` GloVe-100, augment | 65.79 | 48.31 |
+| `vectors` fastText on the corpus, fallback | -- | 51.80 |
+| `vectors` fastText on the corpus, augment | -- | 45.97 |
+
+On Reuters, pretrained vectors are worth **+5.1 points of unseen-label P@1**, and the
+augment mode also gives the best overall numbers (P@1 86.35 -> 87.25, PSP@1 43.97 ->
+47.17). On npm nothing helps. What separates them is whether the vector space covers the
+vocabulary: 97% of Reuters label tokens have a GloVe vector against 77% for npm, whose
+JS jargon (`webpack`, `eslint`, `serverless`) is absent from a 2014 Wikipedia corpus.
+The run prints this coverage and warns below 90%.
+
+Character n-grams help nowhere, and looking at what they retrieve says why:
 
 ```
 acq     -> cyacq(0.34), lt cyacq(0.27), provide cyacq(0.22), acquire(0.22)
@@ -124,13 +140,17 @@ bop     -> prop(0.11), crop(0.11), drop(0.11), stop(0.10)
 housing -> housing(1.00), housing corp(0.70), housing starts(0.61), warehousing(0.60)
 ```
 
-Character n-grams capture *morphology*, which exact matching mostly covers already, and
-they are actively wrong on *abbreviations*, which is where the real gap is: `acquire`
-ranks below the junk match `cyacq`, and `bop` retrieves words that merely rhyme. The
-labels that need help need **semantics**, not spelling — which is the `vectors` mode, or
-an encoder. That path is implemented but untested here, because the hosts serving
-pretrained vectors are blocked from this sandbox; supply any word2vec-format file and it
-runs.
+They capture *morphology*, which exact matching already covers, and are wrong on
+*abbreviations*, which is where the gap is. Pretrained vectors fix some of that
+(`wpi` -> `cpi`, `wholesale`) but not all: `acq` and `bop` are rare enough that their
+GloVe vectors are noise too.
+
+Two implementation details that turned out to matter more than the choice of embedding:
+a name is only embedded when *all* of its tokens are known (averaging over a partly
+missing name collapses `middleware webpack` onto `middleware` and scores a spurious
+cosine of 1), and `-direct_fallback` decides whether fuzzy links only fill gaps or also
+sit alongside exact matches. Augmenting is the better setting when the vectors are good
+and the worse one when they are not.
 
 ### Benchmarking on a GPU
 `colab/ZestXML_A100_benchmark.ipynb` runs both implementations on **GZ-Eurlex-4.3K** with

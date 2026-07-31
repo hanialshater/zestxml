@@ -79,36 +79,66 @@ def char_ngram_matrices(
 # --------------------------------------------------------------------------- #
 # word vectors
 # --------------------------------------------------------------------------- #
-def load_word_vectors(path: str, dtype=torch.float32) -> Tuple[Dict[str, int], Tensor]:
-    """Read a word2vec/GloVe/fastText *text* format file."""
+def load_word_vectors(
+    path: str, dtype=torch.float32, vocab: Optional[set] = None
+) -> Tuple[Dict[str, int], Tensor]:
+    """Read a word2vec/GloVe/fastText *text* format file, optionally keeping only ``vocab``.
+
+    Filtering while reading matters: the full GloVe table is 400k rows, of which a given
+    dataset needs a few thousand.
+    """
+    import numpy as np
+
     index: Dict[str, int] = {}
-    rows: List[List[float]] = []
-    with open(path, encoding="utf-8", errors="ignore") as f:
-        first = f.readline().split()
-        if len(first) > 2:  # no header line: it was already a vector
-            index[first[0]] = 0
-            rows.append([float(x) for x in first[1:]])
+    rows: List[np.ndarray] = []
+
+    def take(word, values):
+        if vocab is None or word in vocab:
+            index[word] = len(rows)
+            rows.append(np.fromstring(values, dtype=np.float32, sep=" "))
+
+    opener = __import__("gzip").open if path.endswith(".gz") else open
+    with opener(path, "rt", encoding="utf-8", errors="ignore") as f:
+        first = f.readline()
+        parts = first.split(" ", 1)
+        if len(first.split()) > 2:  # no header line: it was already a vector
+            take(parts[0], parts[1])
         for line in f:
-            parts = line.rstrip().split(" ")
-            if len(parts) < 3:
-                continue
-            index[parts[0]] = len(rows)
-            rows.append([float(x) for x in parts[1:]])
-    return index, torch.tensor(rows, dtype=dtype)
+            parts = line.rstrip().split(" ", 1)
+            if len(parts) == 2:
+                take(parts[0], parts[1])
+
+    if not rows:
+        raise ValueError(f"no usable vectors read from {path}")
+    return index, torch.as_tensor(np.stack(rows)).to(dtype)
+
+
+def _tokens(name: str) -> List[str]:
+    return name.lower().replace("-", " ").split()
 
 
 def word_vector_matrices(
-    left: Sequence[str], right: Sequence[str], path: str, device=None, dtype=torch.float32
+    left: Sequence[str], right: Sequence[str], path: str, device=None, dtype=torch.float32,
+    log=print,
 ) -> Tuple[Tensor, Tensor]:
     """Average the vectors of each name's tokens, L2 normalised. Unknown names get 0."""
-    index, table = load_word_vectors(path, dtype)
+    needed = {t for names in (left, right) for name in names for t in _tokens(name)}
+    index, table = load_word_vectors(path, dtype, vocab=needed)
+    covered = len(index) / max(1, len(needed))
+    log(f"word vectors: {len(index)}/{len(needed)} tokens covered ({covered:.0%})")
+    if covered < 0.9:
+        log("  warning: low coverage -- these vectors may be the wrong domain for this "
+            "corpus, which is where fuzzy matching starts to hurt")
 
     def embed(names):
         out = torch.zeros(len(names), table.shape[1], dtype=dtype)
         for i, name in enumerate(names):
-            ids = [index[t] for t in name.lower().replace("-", " ").split() if t in index]
-            if ids:
-                out[i] = table[torch.tensor(ids, dtype=torch.long)].mean(0)
+            tokens = _tokens(name)
+            # every token must be known: averaging over a partly-missing name collapses it
+            # onto its known tokens, so "middleware webpack" would look identical to
+            # "middleware" and score a spurious cosine of 1
+            if tokens and all(t in index for t in tokens):
+                out[i] = table[torch.tensor([index[t] for t in tokens], dtype=torch.long)].mean(0)
         return torch.nn.functional.normalize(out, dim=1).to(device)
 
     return embed(left), embed(right)
@@ -170,7 +200,7 @@ def topk_cosine_dense(left: Tensor, right: Tensor, topk: int, min_sim: float, ch
 def similar_names(
     queries: Sequence[str], targets: Sequence[str], mode: str, topk: int = 3, min_sim: float = 0.5,
     vectors: Optional[str] = None, device=None, dtype=torch.float32,
-    max_elems: int = 1 << 26, dense_elems: int = 1 << 24,
+    max_elems: int = 1 << 26, dense_elems: int = 1 << 24, log=print,
 ) -> CSR:
     """(len(queries) x len(targets)) matrix of cosine similarities, top-``topk`` per query."""
     if mode == "charngram":
@@ -179,6 +209,6 @@ def similar_names(
     if mode == "vectors":
         if not vectors:
             raise ValueError("-direct_map vectors needs -direct_vectors <path>")
-        left, right = word_vector_matrices(queries, targets, vectors, device=device, dtype=dtype)
+        left, right = word_vector_matrices(queries, targets, vectors, device=device, dtype=dtype, log=log)
         return topk_cosine_dense(left, right, topk, min_sim)
     raise ValueError(f"unknown direct_map mode: {mode}")

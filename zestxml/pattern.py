@@ -144,7 +144,7 @@ def direct_map(
         return exact
     sims = similar_names(
         [queries[j] for j in keep], Xf, mode, topk=topk, min_sim=min_sim, vectors=vectors,
-        device=device, dtype=dtype, max_elems=max_elems, dense_elems=dense_elems,
+        device=device, dtype=dtype, max_elems=max_elems, dense_elems=dense_elems, log=log,
     )
 
     keep_t = torch.tensor(keep, dtype=torch.long, device=device)
