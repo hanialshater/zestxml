@@ -95,6 +95,13 @@ def main():
     ap.add_argument("-lr", type=float, default=2e-3)
     ap.add_argument("-posw", type=float, default=20.0)
     ap.add_argument("-budget", type=float, default=1e9, help="seconds of training")
+    # the two fixes the first run's diagnosis called for
+    ap.add_argument("-drop_label_id", type=int, default=0,
+                    help="zero out the per-label __label__i__ features so the label side "
+                         "must route through shared tokens instead of memorising an id")
+    ap.add_argument("-norm_labels", type=int, default=0,
+                    help="L2-normalise label vectors at inference, killing the norm/"
+                         "popularity prior that lets memorised seen labels outrank unseen")
     a = ap.parse_args()
     t0 = time.time()
 
@@ -104,6 +111,13 @@ def main():
     Y = read_text_smat(f"{D}/Y_Yf.txt").unit_normalize_rows()
     trnXY = read_text_smat(f"{D}/trn_X_Y.txt")
     xf, yf = read_desc_file(f"{D}/Xf.txt"), read_desc_file(f"{D}/Yf.txt")
+    if a.drop_label_id:
+        # a per-label feature is a free parameter for every label that has positives, and
+        # gradient descent memorises into it rather than learning the shared token map;
+        # the first run traded unseen P@1 36.79 -> 23.00 doing exactly that
+        keep = torch.tensor([not n.startswith("__label__") for n in yf])
+        Y = Y.subset(keep[Y.indices])
+        print(f"dropped {int((~keep).sum())} per-label id features", flush=True)
     nP, nXf = trnX.shape
     nL, nYf = Y.shape
     print(f"train {trnX.shape} test {tstX.shape} labels {Y.shape}", flush=True)
@@ -220,6 +234,12 @@ def main():
 
     tE, nzp = encode(Xte, Xte, Xte, nXf, False, a.kinfer)
     lE, nzl = encode(Ysp, Lbase, Ysp, nYf, True, a.kinfer)
+    if a.norm_labels:
+        norms = np.sqrt(lE.multiply(lE).sum(1)).A.ravel()
+        norms[norms == 0] = 1.0
+        lE = sp.diags(1.0 / norms) @ lE
+        lE = lE.tocsr()
+        print("L2-normalised label vectors", flush=True)
     stats["dense_nnz_point"] = nzp
     stats["dense_nnz_label"] = nzl
     stats["topk_nnz_point"] = tE.nnz / tE.shape[0]

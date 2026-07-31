@@ -47,7 +47,8 @@ def seeds():
 
 def fetch(cache_path, workers=8):
     if os.path.exists(cache_path):
-        with open(cache_path) as f:
+        opener = __import__("gzip").open if cache_path.endswith(".gz") else open
+        with opener(cache_path, "rt") as f:
             packages = {}
             for line in f:
                 p = json.loads(line)
@@ -168,6 +169,16 @@ def build(out_dir, packages, seed=0):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from tools.make_reuters import csr_rows, write_smat
 
+    # raw text, aligned row-for-row with the matrices below: needed by any encoder-based
+    # baseline (Renee and friends read trn_X.txt / tst_X.txt / Y.txt)
+    for fname, rows in (("trn_X.txt", trn), ("tst_X.txt", tst)):
+        with open(f"{out_dir}/{fname}", "w") as f:
+            f.write("\n".join(t.replace("\n", " ").strip() for t, _ in rows) + "\n")
+    with open(f"{out_dir}/Y.txt", "w") as f:
+        f.write("\n".join(labels) + "\n")
+    for fname in ("trn_filter_labels.txt", "tst_filter_labels.txt"):
+        open(f"{out_dir}/{fname}", "w").close()  # no reciprocal pairs to filter here
+
     write_smat(f"{out_dir}/trn_X_Xf.txt", csr_rows(trn_X_Xf), len(Xf))
     write_smat(f"{out_dir}/tst_X_Xf.txt", csr_rows(tst_X_Xf), len(Xf))
     write_smat(f"{out_dir}/Y_Yf.txt", Y_Yf_rows, len(Yf))
@@ -195,6 +206,7 @@ def build(out_dir, packages, seed=0):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("out_dir", nargs="?", default="GZXML-Datasets/GZ-NPM")
-    ap.add_argument("--cache", default="npm_packages.jsonl")
+    ap.add_argument("--cache", default="data/npm_packages.jsonl.gz",
+                    help="a committed snapshot; delete it to re-fetch from the registry")
     args = ap.parse_args()
     build(args.out_dir, fetch(args.cache))

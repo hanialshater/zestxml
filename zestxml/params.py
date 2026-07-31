@@ -31,6 +31,7 @@ DEFAULTS: Dict[str, str] = {
     "direct_vectors": "-",  # word2vec/GloVe/fastText text file for -direct_map vectors
     # ---- shortlist -----------------------------------------------------------
     "shortyK": "100",
+    "shortlist_file": "-",  # use this candidate set instead of generating one
     "F": "10",
     # ---- classifier ----------------------------------------------------------
     "bilinear_classifier_kind": "0",

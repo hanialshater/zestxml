@@ -119,6 +119,15 @@ def build(out_dir):
     trn_X_Y = [[(i, v) for i, v in row if i not in unseen] for row in trn_X_Y]
 
     # ---- write --------------------------------------------------------------
+    # raw text, aligned row-for-row with the matrices below (see make_npm.py)
+    for fname, texts in (("trn_X.txt", trn_text), ("tst_X.txt", tst_text)):
+        with open(f"{out_dir}/{fname}", "w") as f:
+            f.write("\n".join(" ".join(t.split()) for t in texts) + "\n")
+    with open(f"{out_dir}/Y.txt", "w") as f:
+        f.write("\n".join(name.replace("-", " ") for name in labels) + "\n")
+    for fname in ("trn_filter_labels.txt", "tst_filter_labels.txt"):
+        open(f"{out_dir}/{fname}", "w").close()
+
     write_smat(f"{out_dir}/trn_X_Xf.txt", csr_rows(trn_X_Xf), len(Xf))
     write_smat(f"{out_dir}/tst_X_Xf.txt", csr_rows(tst_X_Xf), len(Xf))
     write_smat(f"{out_dir}/Y_Yf.txt", Y_Yf_rows, len(Yf))

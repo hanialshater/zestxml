@@ -62,6 +62,22 @@ def _dtype(params: Params):
     return torch.float64 if params.bool("float64") else torch.float32
 
 
+def _shortlist(params: Params, X: CSR, Y_Yf: CSR, sparsity_pattern: CSR, device, dtype) -> CSR:
+    """The candidate set: generated as usual, or loaded from -shortlist_file."""
+    if params.given("shortlist_file"):
+        path = params.path("shortlist_file")
+        log("loading shortlist from %s" % path)
+        sl = read_bin_smat(path, device, dtype)
+        assert sl.shape == (X.nrows, Y_Yf.nrows), (
+            "shortlist is %s but the data needs %s" % (sl.shape, (X.nrows, Y_Yf.nrows))
+        )
+        return sl
+    return get_shortlist(
+        X, Y_Yf, sparsity_pattern, params.int("shortyK"),
+        max_elems=params.int("max_elems"), dense_elems=params.int("dense_elems"), log=log,
+    )
+
+
 def _load(path: str, device, dtype) -> CSR:
     reader = read_bin_smat if path.endswith(".bin") else read_text_smat
     log("loading %s" % path)
@@ -166,15 +182,7 @@ def run_xhtp_fine_tune(params: Params) -> None:
         trn_X_Xf = trn_X_Xf.unit_normalize_rows()
 
         log("\ngetting %d shortlist per point..." % params.int("shortyK"))
-        shortlist = get_shortlist(
-            trn_X_Xf,
-            Y_Yf,
-            sparsity_pattern,
-            params.int("shortyK"),
-            max_elems=params.int("max_elems"),
-            dense_elems=params.int("dense_elems"),
-            log=log,
-        )
+        shortlist = _shortlist(params, trn_X_Xf, Y_Yf, sparsity_pattern, device, dtype)
         write_bin_smat(shortlist, model_dir + SEP + "shortlist.bin")
         log("[STAT] nnz of shortlist    : %d" % shortlist.nnz)
         log("[STAT] recall of shortlist : %.2f%%" % shortlist.recall(trn_X_Y))
@@ -245,15 +253,7 @@ def run_predict(params: Params) -> None:
         Y_Yf = Y_Yf.unit_normalize_rows()
 
         log("\ngetting %d shortlist per point..." % params.int("shortyK"))
-        shortlist = get_shortlist(
-            tst_X_Xf,
-            Y_Yf,
-            sparsity_pattern,
-            params.int("shortyK"),
-            max_elems=params.int("max_elems"),
-            dense_elems=params.int("dense_elems"),
-            log=log,
-        )
+        shortlist = _shortlist(params, tst_X_Xf, Y_Yf, sparsity_pattern, device, dtype)
         log("[STAT] nnz of shortlist    : %d" % shortlist.nnz)
         if tst_X_Y is not None:
             log("[STAT] recall of shortlist : %.2f%%" % shortlist.recall(tst_X_Y))
