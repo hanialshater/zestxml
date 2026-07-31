@@ -98,6 +98,48 @@ Flags kept for compatibility but inert: `-F` (only used by the approximate short
 because `create_Xf_Yf_map` binarises `trn_X_Y` after `ips_weight` has written to it.
 `-bilinear_add_bias 1` is rejected rather than silently ignored; no run script uses it.
 
+### Validating on a real dataset
+The public GZXML datasets are large Google Drive downloads. For a quick end-to-end check
+on real text, `tools/make_reuters.py` builds one from Reuters-21578, whose topics are
+named in plain words ("grain", "money-supply") and therefore have genuine label text.
+It reproduces the generalized zero-shot setting by stripping a slice of the topics out of
+`trn_X_Y` while keeping them in `tst_X_Y` and `Y_Yf`, so those labels have no training
+point and are reachable only through their own tokens.
+
+```shell
+pip install nltk scikit-learn
+python -c "import nltk; nltk.download('reuters')"
+python tools/make_reuters.py GZXML-Datasets/GZ-Reuters-90
+# 7769 train / 3019 test points, 90 labels (15 unseen), 36599 point features
+# 16.1% of test positives belong to labels with no training example
+
+ARGS="-bs_count 20 -bs_alpha 0.02 -bs_direct_wt 0.8 -shortyK 50 -bilinear_classifier_cost 5 -bilinear_normalize 0"
+python run_torch.py -trn_X_Xf GZXML-Datasets/GZ-Reuters-90/trn_X_Xf.txt ... -type all $ARGS
+python tools/eval_xc.py Results/GZ-Reuters-90/score_mat.bin GZXML-Datasets/GZ-Reuters-90
+```
+
+`tools/eval_xc.py` computes P@k, nDCG@k and propensity scored PSP@k without needing
+pyxclib, and breaks them down by whether a label was seen during training. Same
+hyper-parameters, same data, C++ against this port:
+
+| | P@1 | P@3 | P@5 | nDCG@5 | PSP@1 | PSP@5 |
+| --- | --- | --- | --- | --- | --- | --- |
+| all labels, C++ | 85.56 | 33.71 | 21.25 | 87.24 | 41.17 | 56.82 |
+| all labels, PyTorch | **86.42** | **34.23** | **21.68** | **88.68** | **43.76** | **62.15** |
+| unseen only, C++ | 55.83 | 26.57 | 19.55 | 72.23 | 55.83 | 86.38 |
+| unseen only, PyTorch | **59.96** | 26.57 | 19.51 | **73.72** | **59.96** | 86.21 |
+| seen only, C++ | 95.08 | 36.61 | 22.64 | 96.83 | 86.57 | 93.68 |
+| seen only, PyTorch | **95.19** | **36.70** | **22.75** | **97.15** | 86.12 | **93.80** |
+
+Labels with no training example are retrieved at 59.96 P@1 purely from their text, which
+is the behaviour the method exists for. On seen labels the two implementations are within
+noise of each other; the gain on unseen labels and on the propensity scored metrics comes
+from the exact shortlist and from the classifier reaching a lower objective.
+
+On this dataset the C++ takes 4.9s and this port 20s on 4 CPU threads: the sparse joins
+are written for GPU throughput and carry per-kernel overhead that a small CPU run does
+not amortise. Add `-device cuda` on a GPU box.
+
 ### Tests
 ```shell
 pytest tests -v
