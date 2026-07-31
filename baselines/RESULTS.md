@@ -1,0 +1,338 @@
+# Baseline sweep vs. the ZestXML PyTorch port (GZ-NPM, GZ-Reuters-90)
+
+Six experiment agents, all reporting `status: ok`. Every headline number below was
+**re-measured by me** with `tools/eval_xc.py` against the score matrices on disk, not
+copied from the agents' reports. Where an agent's prose disagreed with the artifact, the
+artifact wins and the discrepancy is called out.
+
+Reference = ZestXML PyTorch port, exact direct map. The canonical artifact is
+`/home/user/zestxml/Results/Npm2exact/score_mat.bin`, which reproduces the briefing
+numbers exactly (73.04 / 40.69 / 60.13 / 19.10 / 28.62, unseen 52.11).
+
+> **Stale reference matrix, read this before comparing seen-only numbers.**
+> `/home/user/zestxml/Results/GZ-NPM-torch/score_mat.bin` is an *older* run of the same
+> config and evaluates to P@1 **71.99**, PSP@1 18.70, unseen 51.73, seen-only P@1 73.85 /
+> seen PSP@1 46.85. The `ova_linear` agent used that file for all its seen-only ZestXML
+> comparisons. The correct reference seen-only figures (from `Npm2exact`) are
+> **P@1 74.97, PSP@1 47.91, PSP@5 57.64**. This makes the OVA gap slightly *larger* than
+> that agent reported; its conclusion is unaffected but its numbers are off.
+
+---
+
+## 1. Comparison table — GZ-NPM (8376 test points, 3223 labels, 286 unseen)
+
+Sorted by unseen-only P@1, because that is what this benchmark exists to measure.
+All values re-verified by me. ✗ in the "reaches unseen?" column = the method has **no
+mechanism at all** to score a label with no training positive.
+
+| Method | reaches unseen? | P@1 | P@5 | PSP@1 | PSP@5 | unseen P@1 | recall@100 |
+|---|---|---|---|---|---|---|---|
+| **ZestXML reference** (`Npm2exact`) | ✓ | **73.04** | 40.69 | 19.10 | 28.62 | **52.11** | 71.8 |
+| lowrank, r=64 primary (`lowrank`) | ✓ | 67.54 | 38.13 | 18.52 | 29.63 | 53.16 ⚠ | 71.82 |
+| label-graph propagation (`label_graph`) | ✓ (no effect) | 73.09 | **41.23** | **19.24** | 30.19 | 52.11 (identical) | 71.8 |
+| better vectors, fastText fallback (`better_vectors`) | ✓ | 73.07 | 40.54 | 19.13 | 28.31 | 50.86 | 71.80 |
+| classical hybrid kNN+BM25 (`classical`) | ✓ (via BM25) | 71.30 | 39.62 | 18.81 | **36.94** | 47.45 | 78.61 † |
+| BM25 only, zero training (`classical-bm25`) | ✓ | 38.35 | 31.45 | **21.95** | **38.40** | 47.45 | 57.43 |
+| dense probe, Numberbatch (`dense_probe`) | ✓ | 37.71 | 18.23 | 20.27 | 22.42 | 33.20 | 39.32 |
+| SPLADE-style learned sparse (`splade`) | ✓ (nominally) | 70.88 | 38.01 | 16.95 | 24.05 | 23.00 | n/a ‡ |
+| OVA linear, 1-vs-all (`ova_linear`) | **✗** | 71.18 | 39.20 | 16.02 | 23.31 | 2.49 = **0** | n/a ‡ |
+| kNN k=25 (`classical-knn25`) | **✗** | 70.63 | 37.09 | 16.89 | 22.78 | 2.49 = **0** | 62.98 |
+| tf-idf centroid (`classical-centroid`) | **✗** | 66.12 | 35.58 | 21.80 | 24.91 | 2.49 = **0** | 65.82 |
+| one-hot lexical control (`dense_probe_onehot`) | ✓ | — | — | — | — | — | 47.16 |
+| ZestXML lexical shortlist (candidate gen. only) | ✓ | — | — | — | — | — | 71.82 |
+
+† not comparable: the hybrid union uses ~200 candidates, everything else 100.
+‡ the method scores all 3223 labels directly and has no separate shortlisting stage, so a
+shortlist recall figure has no counterpart; neither agent computed a top-100 recall.
+recall@100 is the **micro** definition (total hits / total true), the one that reproduces
+the quoted 71.8%. Macro (mean per-point) recall of the same shortlist is 80.81 — do not
+mix the two.
+
+**The 2.49 is not a score.** I checked the artifacts directly: `ova_linear`,
+`classical-knn25` and `classical-centroid` score matrices contain **exactly zero non-zero
+entries in any of the 286 unseen columns**. The evaluator masks seen labels to `-inf`,
+then top-k's a row of all-zero unseen scores and breaks the tie by label id. 2.49 is the
+tie-break floor of this dataset, nothing else. Read it as 0.
+
+This specifically corrects the `ova_linear` agent, which wrote that its unseen P@1 is
+"data-dependent noise, not exactly zero", pointing at non-zero weights in the unseen
+columns of its dense `W`. That is true of `W` but irrelevant to the submitted artifact:
+the matrix is truncated to top-100 labels per point and no unseen label ever survives, so
+the stored unseen scores are all implicit zeros. It lands on precisely the same 2.49 as
+kNN and centroid, which is the giveaway.
+
+### GZ-Reuters-90 (3019 points, 90 labels, 15 unseen)
+
+Only 3 of 6 methods ran Reuters at all. Missing entries are **not measured**, not zero.
+
+| Method | P@1 | unseen P@1 |
+|---|---|---|
+| ZestXML reference (`Reu2exact`) | 86.35 | 61.28 |
+| better vectors, fastText fallback | 86.25 | **64.47** |
+| kNN k=25 | 81.05 | 0 (2.07 artifact) |
+| OVA linear | 81.78 | 0 (2.07 artifact) |
+| BM25 only, zero training | 18.18 | **61.28** |
+| classical hybrid | 72.84 | 61.28 |
+| splade / dense probe / lowrank / label-graph | **not run** | **not run** |
+
+---
+
+## 2. Per-method notes
+
+### better_vectors — fuzzy direct map with fastText / Numberbatch (9 min)
+Replaces GloVe-100 in ZestXML's `-direct_map vectors` fuzzy label-name matching with
+fastText wiki-news-subwords-300 and ConceptNet Numberbatch, in both fallback and augment
+mode; 4 NPM runs + 2 Reuters runs, reference hyperparameters throughout.
+**Result: ties the reference on all-label metrics (73.07 vs 73.04) and loses on the metric
+it targeted (unseen P@1 50.86 vs 52.11).** Wins on Reuters (unseen 64.47 vs 61.28).
+
+The agent's diagnosis is the strongest single piece of analysis in the sweep and I accept
+it. Three independent legs: (a) better vectors buy no coverage on npm — the distributed
+fastText *text table* is subword-trained but not subword-queryable, so npm label-token
+coverage moves 77.1% → 77.8% and Numberbatch is *worse* at 74.6%; (b) where coverage does
+differ, on Reuters, it tracks the result exactly (GloVe 96.8% cov / 66.35 unseen >
+fastText 91.5% / 64.47 > exact 61.28); (c) the fuzzy links that *are* produced on npm are
+qualitatively good ("asserts→assert 0.73", "amazon web services→web services 0.91") and
+still do not help, because only 572 of 6486 label features lack an exact match and only
+348 get any neighbour. Augment mode makes it explicit: +5487 links buys +0.12 all-label
+P@1 and costs 4.5 points of unseen P@1. Shortlist recall is pinned at 71.8% in every
+configuration, so the npm bottleneck is candidate generation, not label-name embedding.
+
+### label_graph — co-occurrence propagation on top of ZestXML scores (17 min)
+`S' = (1-a)S + a·S·G` over a top-k label-label cosine graph, restricted to the existing
+candidate support, tuned on an 80/20 split of the **training** points with ZestXML
+retrained on the 80% (honest tuning, no test-set search).
+**Result: the only method that beats the reference on every all-label metric** — P@5
+41.23 (+0.54), nDCG@5 60.77 (+0.64), PSP@5 30.19 (+1.57) — **and contributes exactly
+nothing to zero-shot.** Its unseen slice is bit-identical to the baseline (52.11), which I
+confirmed to the last decimal.
+
+That identity is not a bug, it is the finding: 0 of the 286 unseen labels have any in- or
+out-edge in a graph built from training co-occurrences, by construction. Propagation
+cannot reorder them. The agent also caught that the naive update *hurts* — without a
+self-loop for isolated labels, `(1-a)S` shrinks unseen labels relative to boosted seen
+ones and PSP@5 drops 0.91 below baseline. The submitted variant adds the self-loop. Note
+the selection honesty caveat: the highest-validation-P@1 config was the *no*-self-loop
+one, and the agent promoted the other on a structural argument after seeing both test
+numbers. It reported both verbatim, which is the right thing to do, but "+0.05 P@1" is
+inside noise and only the PSP@3/PSP@5 gains are real.
+
+### lowrank — dense low-rank term added to the bilinear scorer (7 min)
+`score = xᵀ(W_sparse + UVᵀ)y`, trained jointly on identical shortlists so the low-rank
+term is the only difference from a controlled baseline (which reproduced the reference
+exactly). **Result: clearly loses — P@1 67.54 vs 73.04.**
+
+Diagnosis is clean: 1.52M dense parameters against 515k sparse ones drive the training
+objective from 486k to 74.7k, i.e. memorisation of the 2.47M shortlisted training pairs,
+all of which are seen-label pairs. Shrinking the term walks monotonically back toward
+baseline (r=32 + 10× L2 → P@1 72.77), so the only non-harmful regime is the one where the
+term is switched off.
+
+**⚠ Skeptical note on the 53.16 unseen P@1** — the one number in the sweep that beats the
+reference on the zero-shot metric while the method is 5.5 points worse overall. There is a
+mechanism (unseen labels' `V` rows are driven by shared `1_<token>` label features, and
+re-ranking within the fixed candidate set can improve the unseen-only ordering), so it is
+not impossible. But I do not believe it is signal: the agent's own three variants give
+unseen 53.16 / 51.48 / 51.96 with no monotone relationship to the term's strength, and
+that ±1.7-point spread is the noise floor on a 4786-point slice. Treat it as "unchanged".
+Do not cite this as a zero-shot win.
+
+### classical — centroid, kNN, BM25, and a 1:1 hybrid (12 seconds of compute)
+The most useful result in the sweep, and the cheapest. **BM25 with zero training reaches
+unseen P@1 47.45 on NPM against ZestXML's 52.11 — 91% of the reference's zero-shot
+accuracy from naive lexical overlap between the package text and the tag's own name.** On
+Reuters, BM25's unseen P@1 is 61.28, which equals the reference to two decimals.
+
+Two things to be careful with here. First, the Reuters coincidence is a coincidence of
+counts, not of predictions: 61.28% of 532 points is exactly 326 correct for both systems,
+but the two disagree further down the list (ZestXML P@3 26.50 / nDCG@5 74.29 vs BM25
+25.81 / 73.24). The agent's phrasing "ZestXML's zero-shot ability on Reuters appears to be
+entirely lexical" overstates it by a hair — "almost entirely, at rank 1, on 532 points and
+15 labels" is the defensible version. Second, the hybrid's PSP@5 of 36.94 (vs the
+reference's 28.62) is real and I verified it, but it is bought with BM25's rare/unseen
+mass and it does **not** transfer: on Reuters the same untuned 1:1 hybrid collapses to
+P@1 72.84 vs kNN's 81.05, because there BM25's seen-label scores are near-noise and the
+fixed weight lets that noise outrank good kNN scores.
+
+Centroid and kNN are pure co-occurrence memorisation and cannot touch unseen labels at all
+(see the 2.49 note above). kNN beats centroid on P@1 because npm tags are multi-modal;
+centroid beats kNN on PSP because averaging is better behaved for rare labels.
+
+### ova_linear — one-vs-all linear classifiers, no label features (9 min)
+Squared hinge, L2 tuned on a held-out 10% of the *training* set. **Result: loses to
+ZestXML on all labels (71.18 vs 73.04) and — the interesting part — loses on seen labels
+too** (seen P@1 73.09 vs 74.97; seen PSP@1 40.34 vs **47.91**, using the corrected
+reference). So it does not establish the "seen-label ceiling" the experiment was designed
+to expose: the zero-shot machinery costs nothing in seen-label head accuracy and actively
+helps on seen *tail* labels.
+
+The explanation — 95355 positives over 3223 labels is ~30 per label, so per-label problems
+are data-starved and ZestXML's shared token representation acts as transfer/regularisation
+— is convincing, and the 7.6-point seen-only PSP@1 gap is the direct measurement. Caveats
+the agent flagged and I endorse: this is 30 full-batch Adam epochs with a shared L2, not a
+converged per-label DiSMEC solve, and the loss was still oscillating. Read seen-only P@1
+73.09 vs 74.97 as "roughly a tie on head accuracy". The PSP gap is large enough to
+probably survive better optimisation, but that was not verified. Reuters reused the NPM
+hyperparameters untuned.
+
+### splade — learned sparse expansion, no pretrained LM (4.5 min)
+Learned low-rank expansion on both point and label side over the point-feature vocabulary,
+FLOPS-regularised, trained with BCE on sampled pairs, retrieved with a genuine sparse
+inverted-index dot product. **Result: loses on every headline metric and collapses on
+zero-shot — unseen P@1 23.00 vs 52.11.**
+
+The architecture works as retrieval: sparsity is real and measured (370.9 non-zeros per
+point vector out of 17299 before top-k, down from 2128 at step 20 — the regulariser is
+doing the work), and seen P@1 72.78 is respectable. What kills it is a structural
+overfitting route the agent identified and then demonstrated with a diagnostic run: every
+label carries a unique `__label__i__name` feature, so the learned label expansion turns
+that one feature into a free per-label vector for any label with positives. At 80 steps
+unseen P@1 is 36.79 and seen is 67.71; at 576 steps unseen has fallen to 23.00 while seen
+has risen to 72.78. Training monotonically trades zero-shot generalisation for seen-label
+memorisation. This is the cleanest evidence in the sweep that **it is the pretrained MLM's
+lexical priors, not the sparse-expansion architecture, that makes real SPLADE work
+zero-shot** — learning the expansion from 25127 points with ~10.7 non-zeros each gives it
+no way to relate tokens that never co-occur.
+
+The agent correctly refused to promote the 80-step smoke run as its headline, since the
+only legitimate way to select it would be a pseudo-unseen validation split it did not have
+budget to build. Named fixes it did not get to: drop or heavily penalise the per-label id
+feature, L2-normalise label vectors to kill the norm/popularity prior.
+
+### dense_probe — retrieval-ceiling probe with pretrained word vectors (4 min)
+Not a competitor; a probe of whether dense retrieval could raise the 71.8% candidate
+ceiling. **Answer: decisively no, and it fails for two separable reasons that its own
+one-hot control pins down.** (1) The word-vector step is itself harmful at K=100: plain
+lexical token cosine through the identical pipeline recalls 47.16 micro@100, Numberbatch
+drops it to 39.32, fastText to 27.25. npm vocabulary is technical and 21–27% OOV, the
+in-vocabulary tokens get blurred toward general English, and tf-idf averaging over
+hundreds of features collapses documents toward a corpus centroid. (2) Even the
+perfectly-covered lexical control (47.16) is ~25 points below ZestXML's shortlist (71.82),
+so the shortlist's advantage is **learned Xf→Yf structure, not name matching**, and no
+untrained retriever — dense or sparse — closes that.
+
+The one positive, and the sweep's most actionable lead: dense is *complementary* on unseen
+labels. Union of dense-Numberbatch top-50 with lexical top-50 reaches **57.28 unseen micro
+recall vs the full lexical top-100's 54.01**, at the same 100-candidate budget, paying
+3.2 points of seen recall. As a ranker, pure dense cosine is far behind everything
+(P@1 37.71).
+
+Note the anomaly, which I verified rather than smoothed: dense_probe is the only method
+whose seen-only P@1 (34.12) is *below* its all-label P@1 (37.71). That is not an error —
+dense cosine systematically ranks specific unseen label names above frequent seen ones, so
+masking unseen labels away removes correct top-1 predictions. It is a compact restatement
+of the complementarity finding. Its Numberbatch-over-fastText choice was made on the test
+split (no dev split exists here) and should be discounted; both tables are reported.
+
+---
+
+## 3. Where the remaining gap is
+
+**Solid — I would defend these.**
+
+1. *The npm zero-shot ceiling is candidate generation, not label-name representation.*
+   Shortlist recall@100 is 71.8% in every single configuration tried: exact map, fastText
+   fallback, fastText augment, Numberbatch either way, low-rank re-ranking, graph
+   propagation. Nothing in this sweep moved it. Every re-ranking method is therefore
+   fighting over a fixed 71.8% ceiling and a 3223-way competition.
+2. *A large majority of ZestXML's zero-shot ability on these datasets is lexical.* BM25
+   with literally zero training gets 47.45 / 52.11 of the reference's unseen P@1 on NPM
+   and matches it at rank 1 on Reuters. The learned bilinear part buys ~4.7 unseen P@1 on
+   NPM and very little on Reuters.
+3. *Co-occurrence-based methods are structurally incapable of zero-shot*, and their 2.49 /
+   2.07 readings are an evaluator tie-break, not a score. Verified at the matrix level.
+4. *ZestXML's shared-token representation is a strong regulariser for rare SEEN labels,
+   not just a zero-shot device.* OVA loses 7.6 points of seen-only PSP@1 to it with ~30
+   positives per label.
+5. *Dense word-vector retrieval is worse than lexical retrieval on npm, at equal K.* The
+   one-hot control makes this a controlled comparison rather than an impression.
+6. *Label co-occurrence propagation cannot help unseen labels* — 0 of 286 have any edge.
+   Proof by construction, and the unseen slice is bit-identical before and after.
+
+**Suggestive — directionally believable, not established.**
+
+7. *Learned sparse expansion without a pretrained LM cannot do zero-shot.* One
+   architecture, one seed, one hyperparameter setting, no validation split. The training
+   dynamic (unseen 36.79 → 23.00 as seen 67.71 → 72.78) is a strong hint that the failure
+   is structural rather than a tuning miss, but the named fixes (drop the per-label id
+   feature, normalise label vectors) were never run, so "SPLADE-without-BERT fails at
+   zero-shot" is currently "this SPLADE-without-BERT failed at zero-shot".
+8. *Adding dense candidates raises the unseen ceiling.* +3.3 unseen micro recall at equal
+   budget is measured, but only end-to-end as recall — nobody ran the pipeline on the
+   union shortlist, so the downstream P@1/PSP effect is unknown. Note this sits in mild
+   tension with `better_vectors`, where injecting semantic links into *scoring* hurt
+   unseen precision; the resolution is presumably that extra semantic mass helps recall
+   and hurts ranking, but that is a hypothesis, not a result.
+9. *Label-graph propagation's +1.57 PSP@5.* Honestly tuned and consistent between
+   validation and test, so probably real, but it is one dataset and the P@1 movement is
+   noise.
+10. *The classical hybrid's PSP@5 36.94 > reference 28.62.* Verified on NPM, but the same
+    untuned hybrid loses 8 points of P@1 on Reuters, so it does not generalise as a recipe.
+11. *OVA's seen-label near-tie.* An unconverged 30-epoch Adam solve; a proper LIBLINEAR
+    per-label solve would plausibly add 1–2 points.
+
+**Could not be tested at all — do not draw conclusions here.**
+
+12. **Any pretrained transformer.** HuggingFace is blocked from this sandbox, so the whole
+    class the field currently uses (dense bi-encoders, cross-encoder re-rankers, real
+    SPLADE with MLM-initialised expansion, T5/GPT label generation) is untouched. The
+    single most important untested hypothesis is whether an MLM's lexical priors close the
+    npm unseen gap that static word vectors cannot.
+13. **Real fastText with subword backoff.** We only had the 1M-word text table, which is
+    subword-*trained* but not subword-*queryable*. The npm vocabulary is compound and
+    versioned (`a11y`, `webpack`, `a6cab4d`); hashed character n-grams from the binary
+    model are the one remaining door for the coverage hypothesis, and it stayed closed.
+14. **GPU-scale training.** Everything here is CPU, 2 threads, and mostly under 10 minutes
+    per method. The low-rank and SPLADE runs in particular are compute-starved.
+15. **Published XMC benchmarks.** GZ-NPM and GZ-Reuters-90 are self-built. Reuters has 90
+    labels, 15 of them unseen, and 532 evaluable unseen points — several "findings" there
+    rest on a few hundred decisions. Nothing in this sweep is comparable to published
+    LF-AmazonTitles / EURLex / Wikipedia numbers, and no conclusion about ZestXML's
+    standing versus the literature can be drawn from it.
+16. **Reuters for four of six methods.** splade, dense_probe, lowrank and label_graph
+    never ran it. Where a table cell is empty it is unmeasured.
+17. **Variance.** Every method is a single seed with no error bars. On the 4786-point
+    unseen slice the one-sigma binomial width is roughly ±0.7 points, so every unseen-P@1
+    difference under ~1.5 points in this report — including lowrank's "+1.05" and
+    label_graph's "+0.05" P@1 — is uninterpretable.
+
+---
+
+## 4. What to run next, in order
+
+1. **Fix the SPLADE label-side leak and re-run.** Drop (or heavily L2-penalise) the
+   per-label `__label__i__name` feature so the label side must route through shared
+   tokens, L2-normalise label vectors, and early-stop on a held-out set of *pseudo-unseen*
+   seen labels. *Payoff:* turns a confounded negative into a clean test of whether the
+   sparse-expansion architecture itself can do zero-shot; the diagnostic run says unseen
+   P@1 in the 35–40 range is reachable. *Needs:* nothing — CPU, ~10 min, code already
+   written.
+2. **Attack candidate generation, not ranking.** Build the shortlist as
+   lexical-top-50 ∪ dense-top-50 and run the full ZestXML pipeline on it. *Payoff:* the
+   only measured route past the 71.8% ceiling that every re-ranker is stuck behind
+   (+3.3 unseen recall at equal budget). *Needs:* CPU, the already-downloaded Numberbatch
+   table, one pipeline run.
+3. **Real fastText binary with subword backoff for the fuzzy direct map.** *Payoff:*
+   closes the single open door in the coverage hypothesis — npm's OOV tokens are exactly
+   the compound/versioned strings character n-grams are for. Reuters already shows the
+   mechanism fires when coverage is there (+5 unseen P@1 over exact). *Needs:* the ~7 GB
+   `cc.en.300.bin` download; CPU only.
+4. **A converged per-label OVA (LIBLINEAR / DiSMEC-style, per-label C).** *Payoff:*
+   settles whether ZestXML's seen-label tie is real or an artifact of an unconverged Adam
+   baseline — currently the weakest link in the "zero-shot machinery is free" claim.
+   *Needs:* CPU, ~1 hour, liblinear.
+5. **Pretrained-transformer label encoder** (MLM-initialised SPLADE, or a bi-encoder over
+   label names with ZestXML's sparse scorer as the ranker). *Payoff:* the largest expected
+   move on unseen P@1, and the direct test of the "pretrained lexical priors are the
+   load-bearing part" hypothesis that runs through three of the six reports. *Needs:*
+   **unblocked HuggingFace + GPU** — cannot start today.
+6. **Re-run the two most interesting results on a published XMC benchmark** (LF-Amazon-131K
+   or EURLex-4.3K zero-shot splits): the BM25-recovers-91%-of-zero-shot finding, and the
+   OVA seen-label comparison. *Payoff:* tells us whether these are properties of
+   zero-shot XMC or artifacts of two self-built datasets — right now we cannot tell.
+   *Needs:* **benchmark data** (download + preprocessing), CPU sufficient.
+7. **Cheap hygiene, do it alongside anything above:** delete or clearly label the stale
+   `Results/GZ-NPM-torch` matrix so no future agent compares against 71.99 again; run the
+   four missing Reuters configurations; put 3 seeds behind every unseen-P@1 claim.
+   *Payoff:* removes two live sources of wrong conclusions in this very report.
+   *Needs:* CPU, under an hour.
