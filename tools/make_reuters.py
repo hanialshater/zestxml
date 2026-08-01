@@ -36,6 +36,27 @@ def write_smat(path, rows, ncols):
             f.write(" ".join("%d:%.5f" % (i, v) for i, v in row) + "\n")
 
 
+def one_line(text):
+    """Collapse every kind of whitespace to single spaces.
+
+    Text goes into line-per-row files that are read back with universal newlines, so a
+    stray \r or \v inside a description silently becomes an extra row and misaligns the
+    text against the label matrix. str.split() with no argument splits on all of them.
+    """
+    return " ".join(str(text).split())
+
+
+def write_lines(path, texts, expected):
+    """Write one text per line, and refuse to emit a file that would misalign."""
+    lines = [one_line(t) for t in texts]
+    assert len(lines) == expected, f"{path}: {len(lines)} texts but {expected} rows expected"
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    with open(path, encoding="utf-8") as f:  # verify what a reader will actually see
+        got = sum(1 for _ in f)
+    assert got == expected, f"{path}: writes {expected} rows but reads back as {got}"
+
+
 def csr_rows(mat):
     mat = mat.tocsr()
     mat.sort_indices()
@@ -120,11 +141,9 @@ def build(out_dir):
 
     # ---- write --------------------------------------------------------------
     # raw text, aligned row-for-row with the matrices below (see make_npm.py)
-    for fname, texts in (("trn_X.txt", trn_text), ("tst_X.txt", tst_text)):
-        with open(f"{out_dir}/{fname}", "w") as f:
-            f.write("\n".join(" ".join(t.split()) for t in texts) + "\n")
-    with open(f"{out_dir}/Y.txt", "w") as f:
-        f.write("\n".join(name.replace("-", " ") for name in labels) + "\n")
+    write_lines(f"{out_dir}/trn_X.txt", trn_text, len(trn_ids))
+    write_lines(f"{out_dir}/tst_X.txt", tst_text, len(tst_ids))
+    write_lines(f"{out_dir}/Y.txt", [n.replace("-", " ") for n in labels], len(labels))
     for fname in ("trn_filter_labels.txt", "tst_filter_labels.txt"):
         open(f"{out_dir}/{fname}", "w").close()
 

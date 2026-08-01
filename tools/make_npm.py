@@ -167,15 +167,13 @@ def build(out_dir, packages, seed=0):
     trn_X_Y = [[(i, v) for i, v in row if i not in unseen] for row in trn_X_Y]
 
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from tools.make_reuters import csr_rows, write_smat
+    from tools.make_reuters import csr_rows, write_lines, write_smat
 
     # raw text, aligned row-for-row with the matrices below: needed by any encoder-based
     # baseline (Renee and friends read trn_X.txt / tst_X.txt / Y.txt)
-    for fname, rows in (("trn_X.txt", trn), ("tst_X.txt", tst)):
-        with open(f"{out_dir}/{fname}", "w") as f:
-            f.write("\n".join(t.replace("\n", " ").strip() for t, _ in rows) + "\n")
-    with open(f"{out_dir}/Y.txt", "w") as f:
-        f.write("\n".join(labels) + "\n")
+    write_lines(f"{out_dir}/trn_X.txt", [t for t, _ in trn], len(trn))
+    write_lines(f"{out_dir}/tst_X.txt", [t for t, _ in tst], len(tst))
+    write_lines(f"{out_dir}/Y.txt", labels, len(labels))
     for fname in ("trn_filter_labels.txt", "tst_filter_labels.txt"):
         open(f"{out_dir}/{fname}", "w").close()  # no reciprocal pairs to filter here
 
