@@ -320,11 +320,28 @@ def test_label_expand_adds_features_without_disturbing_the_default(tmp_path):
     assert carries == [0], "1_trail must land on hiking and on no other label"
 
 
-def test_api_rejects_unknown_parameters():
+def test_api_rejects_unknown_parameters(tmp_path):
     """A misspelled hyper-parameter must fail loudly, not be silently ignored."""
     from zestxml import ZestXML
+    ds = tmp_path / "ds"
+    ds.mkdir()
+    for name in ("trn_X_Xf", "tst_X_Xf", "Y_Yf", "trn_X_Y", "tst_X_Y", "Xf", "Yf"):
+        (ds / f"{name}.txt").write_text("0 0\n")
     with pytest.raises(TypeError, match="shortyk"):
-        ZestXML("nowhere", "nowhere/res", shortyk=5)
+        ZestXML(str(ds), str(tmp_path / "res"), shortyk=5)
+
+
+def test_api_reports_a_missing_dataset_at_construction(tmp_path):
+    """Otherwise the path stays at its '-' default and fails as FileNotFoundError: '-'."""
+    from zestxml import ZestXML
+    with pytest.raises(FileNotFoundError, match="trn_X_Xf.txt"):
+        ZestXML(str(tmp_path / "absent"), str(tmp_path / "res"))
+
+    half = tmp_path / "half"
+    half.mkdir()
+    (half / "trn_X_Xf.txt").write_text("0 0\n")
+    with pytest.raises(FileNotFoundError, match="Y_Yf.txt"):
+        ZestXML(str(half), str(tmp_path / "res"))
 
 
 def test_select_unseen_labels_keeps_them_out_of_training_only():

@@ -36,6 +36,10 @@ DATA_FILES = {
     "Yf": "Yf.txt",
 }
 
+# tst_X_Y is not among them: it is only used to report shortlist recall, and predicting on
+# data with no ground truth is a legitimate thing to want.
+REQUIRED = [name for name in DATA_FILES if name != "tst_X_Y"]
+
 
 class ZestXML:
     """A configured run over one dataset directory."""
@@ -56,6 +60,16 @@ class ZestXML:
             path = os.path.join(data_dir, fname)
             if name not in options and os.path.exists(path):
                 options[name] = path
+        # Fail here rather than deep in the pipeline: an absent file otherwise leaves the
+        # parameter at its "-" default and surfaces much later as FileNotFoundError: '-'.
+        missing = [DATA_FILES[n] for n in REQUIRED if n not in options]
+        if missing:
+            hint = ("the directory does not exist" if not os.path.isdir(data_dir)
+                    else "present: " + (", ".join(sorted(os.listdir(data_dir))[:8]) or "nothing"))
+            raise FileNotFoundError(
+                "%s is not a dataset directory -- missing %s (%s). Build one with "
+                "zestxml.build_dataset()." % (data_dir, ", ".join(missing), hint)
+            )
 
         self.data_dir = data_dir
         self.res_dir = res_dir

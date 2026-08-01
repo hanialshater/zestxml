@@ -23,6 +23,8 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from urllib.request import Request, urlopen
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
 SEARCH = "https://registry.npmjs.org/-/v1/search?text={q}&size={size}&from={frm}"
 PAGES = 4
 SIZE = 250
@@ -166,8 +168,7 @@ def build(out_dir, packages, seed=0):
     unseen |= {i for i in range(len(labels)) if trn_freq[i] == 0}
     trn_X_Y = [[(i, v) for i, v in row if i not in unseen] for row in trn_X_Y]
 
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-    from tools.make_reuters import csr_rows, write_lines, write_smat
+    from zestxml.dataset import csr_rows, write_lines, write_smat
 
     # raw text, aligned row-for-row with the matrices below: needed by any encoder-based
     # baseline (Renee and friends read trn_X.txt / tst_X.txt / Y.txt)
