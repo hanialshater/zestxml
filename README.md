@@ -382,8 +382,19 @@ propagation, and Renee. The short version:
 * Renee, end-to-end on a GPU in 39 minutes, finished behind ZestXML's ~1 CPU minute on
   every metric at this data scale.
 
-`benchmarks/colab/` has A100 notebooks; `benchmarks/colab_benchmark.sh` runs the same thing
-from a shell.
+`benchmarks/colab/ZestXML_benchmarks.ipynb` reruns all of it on a GPU box and prints the two
+tables. Stages are independent — ZestXML and its variants, classical baselines, SPLADE,
+pretrained encoders, and Renee — so a partial run still gives a partial table. Only Renee
+needs a GPU, and only it costs real time (45–90 min against ~5 for everything else).
+
+To regenerate the tables from artifacts you already have:
+
+```shell
+python benchmarks/results_table.py GZ-NPM --scan --md
+```
+
+Every row is recomputed from the score matrix on disk, so the table cannot drift from what
+it describes.
 
 ## Tests
 

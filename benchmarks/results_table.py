@@ -37,6 +37,11 @@ RUNS = {
         ("classical-centroid", "tf-idf centroid"),
         ("ova_linear", "OVA linear (1-vs-all)"),
         ("dense_probe", "dense probe, Numberbatch"),
+        # produced by benchmarks/colab/ZestXML_benchmarks.ipynb, on a GPU box
+        ("renee", "Renee (end-to-end encoder)"),
+        ("npm-dense", "dense probe, MiniLM-L6"),
+        ("npm-hybrid", "ZestXML on a hybrid shortlist"),
+        ("splade-both", "SPLADE, no label id, normalised"),
     ],
     "GZ-Reuters-90": [
         ("Reu2exact", "ZestXML (reference)"),
@@ -58,17 +63,27 @@ COLS = [("P@1", "all labels"), ("P@5", "all labels"), ("PSP@1", "all labels"),
 HEAD = ["P@1", "P@5", "PSP@1", "PSP@5", "unseen P@1", "seen P@1"]
 
 
-def collect(dataset, results="Results"):
+def discover(dataset, results):
+    """Every run directory holding a score matrix, known label first, dir name otherwise."""
+    known = dict(RUNS[dataset])
+    listed = [(r, known[r]) for r, _ in RUNS[dataset]]
+    extra = sorted(d for d in os.listdir(results)
+                   if d not in known and os.path.exists(f"{results}/{d}/score_mat.bin"))
+    return listed + [(d, d) for d in extra]
+
+
+def collect(dataset, results="Results", scan=False):
     data_dir = f"GZXML-Datasets/{dataset}"
     shape = read_text_smat(f"{data_dir}/tst_X_Y.txt").shape
     rows, skipped = [], []
-    for run, label in RUNS[dataset]:
+    for run, label in (discover(dataset, results) if scan else RUNS[dataset]):
         path = f"{results}/{run}/score_mat.bin"
         if not os.path.exists(path):
             skipped.append((label, "no artifact"))
             continue
         if read_bin_smat(path).shape != shape:
-            skipped.append((label, "shape mismatch"))
+            if not scan:  # scanning sees every dataset's runs; only complain about asked-for ones
+                skipped.append((label, "shape mismatch"))
             continue
         m = report(path, data_dir, verbose=False)
         rows.append((label, run, [m[split][c] if split in m else float("nan") for c, split in COLS]))
@@ -76,8 +91,8 @@ def collect(dataset, results="Results"):
     return rows, skipped
 
 
-def main(dataset, markdown=False, results="Results"):
-    rows, skipped = collect(dataset, results)
+def main(dataset, markdown=False, results="Results", scan=False):
+    rows, skipped = collect(dataset, results, scan)
     truth = read_text_smat(f"GZXML-Datasets/{dataset}/tst_X_Y.txt")
     unseen = sum(1 for _ in open(f"GZXML-Datasets/{dataset}/unseen_labels.txt"))
     print(f"# {dataset} -- {truth.nrows} test points, {truth.ncols} labels ({unseen} unseen)\n")
@@ -100,5 +115,7 @@ if __name__ == "__main__":
     ap.add_argument("dataset", choices=sorted(RUNS))
     ap.add_argument("--md", action="store_true")
     ap.add_argument("--results", default="Results")
+    ap.add_argument("--scan", action="store_true",
+                    help="also include run directories this script has no label for")
     a = ap.parse_args()
-    main(a.dataset, a.md, a.results)
+    main(a.dataset, a.md, a.results, a.scan)
