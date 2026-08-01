@@ -4,3 +4,5 @@ GZXML-Datasets/
 __pycache__/
 ipynb/
 run
+.claude/
+*.pyc

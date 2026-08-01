@@ -1,8 +1,7 @@
 """Stage 1: mine the sparsity pattern of the bilinear matrix W (num_Xf x num_Yf).
 
 Port of ``create_Xf_Yf`` / ``create_Xf_Yf_map`` / ``create_Xf_Yf_map_direct`` /
-``remove_duplicates`` from ``Source/helper.cpp`` and ``prod_for_jaccard`` from
-``Source/mat.h``.
+``remove_duplicates`` / ``prod_for_jaccard`` from the C++ reference implementation.
 
 Two feature-pair scores are combined:
 

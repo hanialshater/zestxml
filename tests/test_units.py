@@ -266,22 +266,23 @@ def test_build_dataset_end_to_end(tmp_path):
     yf = read_desc_file(f"{out}/Yf.txt")
     assert "1_hiking" in yf and any(n.startswith("__label__") for n in yf)
 
-    # and the whole pipeline runs on it
-    from zestxml.params import Params
-    from zestxml.pipeline import run_xhtp_approx, run_xhtp_fine_tune, run_predict
-    argv = []
-    for k, v in {"trn_X_Xf": f"{out}/trn_X_Xf.txt", "tst_X_Xf": f"{out}/tst_X_Xf.txt",
-                 "Y_Yf": f"{out}/Y_Yf.txt", "trn_X_Y": f"{out}/trn_X_Y.txt",
-                 "tst_X_Y": f"{out}/tst_X_Y.txt", "Xf": f"{out}/Xf.txt", "Yf": f"{out}/Yf.txt",
-                 "res_dir": f"{out}/res", "model_dir": f"{out}/res/model", "type": "all",
-                 "shortyK": "4", "bs_count": "5", "bilinear_classifier_maxitr": "3"}.items():
-        argv += ["-" + k, v]
-    p = Params.parse(argv)
-    run_xhtp_approx(p)
-    run_xhtp_fine_tune(p)
-    run_predict(p)
-    scores = read_bin_smat(f"{out}/res/score_mat.bin")
+    # and the whole pipeline runs on it, through the public API
+    from zestxml import ZestXML
+    model = ZestXML(out, f"{out}/res", shortyK=4, bs_count=5, bilinear_classifier_maxitr=3)
+    scores = model.fit().predict()
     assert scores.shape == (100, 4) and scores.nnz > 0
+    assert read_bin_smat(f"{out}/res/score_mat.bin").nnz == scores.nnz
+
+    metrics = model.evaluate(verbose=False)
+    assert 0.0 <= metrics["all labels"]["P@1"] <= 100.0
+    assert metrics["all labels"]["points"] == 100
+
+
+def test_api_rejects_unknown_parameters():
+    """A misspelled hyper-parameter must fail loudly, not be silently ignored."""
+    from zestxml import ZestXML
+    with pytest.raises(TypeError, match="shortyk"):
+        ZestXML("nowhere", "nowhere/res", shortyk=5)
 
 
 def test_select_unseen_labels_keeps_them_out_of_training_only():

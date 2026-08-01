@@ -1,9 +1,9 @@
 """Readers/writers for the file formats used by the C++ implementation.
 
 Both the text format (``<num_row> <num_col>`` header followed by ``idx:val`` lines) and
-the binary ``.bin`` dumps are byte-compatible with ``Source/mat.h``, so models and score
-matrices can be moved between the two implementations in either direction and
-``metrics.py`` keeps working unchanged.
+the binary ``.bin`` dumps are byte-compatible with the C++ ``SMat``, so models and score
+matrices written by either implementation can be read by the other. That compatibility is
+what let this port be validated against the reference; the C++ itself no longer lives here.
 """
 
 from __future__ import annotations
@@ -64,7 +64,7 @@ def write_text_smat(mat: CSR, path: str) -> None:
 def read_desc_file(path: str) -> List[str]:
     """Feature description files (``Xf.txt`` / ``Yf.txt``).
 
-    ``read_desc_file`` in ``Source/utils.h`` reads lines until eof and then unconditionally
+    The C++ ``read_desc_file`` reads lines until eof and then unconditionally
     drops the last one; splitting on newline and dropping the final element reproduces
     that exactly, trailing newline or not.
     """

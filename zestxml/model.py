@@ -179,7 +179,7 @@ def get_shortlist(
 ) -> CSR:
     """Top-``shortyK`` labels per point under ``X_Xf @ sparsity_pattern @ Y_Yf^T``.
 
-    ``get_approx_shortlist`` in ``Source/zestxml.cpp`` walks a per-label-feature inverted
+    The C++ ``get_approx_shortlist`` walks a per-label-feature inverted
     index with a shrinking threshold to approximate this top-k; here the same quantity is
     computed exactly in chunks, which is both simpler to vectorise and strictly better
     for shortlist recall (``get_exact_shortlist`` is the C++ equivalent).

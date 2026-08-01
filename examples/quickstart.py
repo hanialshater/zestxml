@@ -12,15 +12,12 @@ concatenated titles of items they interacted with, and the labels are interest n
 
 import os
 import random
-import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-from zestxml.dataset import build_dataset, select_unseen_labels  # noqa: E402
-from zestxml.params import Params  # noqa: E402
-from zestxml.pipeline import run_predict, run_xhtp_approx, run_xhtp_fine_tune  # noqa: E402
+from zestxml import ZestXML, build_dataset, select_unseen_labels  # noqa: E402
 
 DATA_DIR = "GZXML-Datasets/Quickstart"
 RES_DIR = "Results/quickstart"
@@ -90,42 +87,24 @@ def build(trn_texts, trn_labels, tst_texts, tst_labels, zero_shot=True):
 
 
 # --------------------------------------------------------------------------- #
-# 3. train and predict
+# 3. train, predict, evaluate
 # --------------------------------------------------------------------------- #
-def train_and_predict():
-    """The same three stages `run_torch.py -type all` runs, called directly."""
-    argv = []
-    for key, value in {
-        "trn_X_Xf": f"{DATA_DIR}/trn_X_Xf.txt", "tst_X_Xf": f"{DATA_DIR}/tst_X_Xf.txt",
-        "Y_Yf": f"{DATA_DIR}/Y_Yf.txt", "trn_X_Y": f"{DATA_DIR}/trn_X_Y.txt",
-        "tst_X_Y": f"{DATA_DIR}/tst_X_Y.txt", "Xf": f"{DATA_DIR}/Xf.txt",
-        "Yf": f"{DATA_DIR}/Yf.txt",
-        "res_dir": RES_DIR, "model_dir": f"{RES_DIR}/model",
-        "device": "auto",            # cuda when available
-        "shortyK": "8",              # candidates per point; with few labels, score them all
-        "bs_count": "20",            # label features kept per point feature when mining W
-        "bs_direct_wt": "0.8",       # weight of an exact label-token to point-token match
-        "bilinear_classifier_cost": "5",
-        "bilinear_classifier_maxitr": "20",
-        "bilinear_normalize": "0",
-        "num_thread": "0",
-    }.items():
-        argv += ["-" + key, value]
-
-    params = Params.parse(argv)
-    run_xhtp_approx(params)       # stage 1: mine the sparsity pattern of W
-    run_xhtp_fine_tune(params)    # stage 2: shortlist + train the bilinear classifier
-    run_predict(params)           # stage 3: score the test points
-
-
-# --------------------------------------------------------------------------- #
-# 4. evaluate
-# --------------------------------------------------------------------------- #
-def evaluate():
-    subprocess.run(
-        [sys.executable, "tools/eval_xc.py", f"{RES_DIR}/score_mat.bin", DATA_DIR],
-        cwd=ROOT, check=True,
+def train_and_evaluate():
+    """Every keyword below is a parameter of `run_torch.py`, under the same name."""
+    model = ZestXML(
+        DATA_DIR, RES_DIR,
+        device="auto",                  # cuda when available
+        shortyK=8,                      # candidates per point; few labels here, score them all
+        bs_count=20,                    # label features kept per point feature when mining W
+        bs_direct_wt=0.8,               # weight of an exact label-token to point-token match
+        bilinear_classifier_cost=5,
+        bilinear_classifier_maxitr=20,
+        bilinear_normalize=0,
+        num_thread=0,
     )
+    model.fit()          # stage 1 mines the sparsity pattern of W, stage 2 trains over it
+    model.predict()      # stage 3 scores the test points
+    return model.evaluate()
 
 
 if __name__ == "__main__":
@@ -135,6 +114,4 @@ if __name__ == "__main__":
 
     build(trn_texts, trn_labels, tst_texts, tst_labels)
     print()
-    train_and_predict()
-    print()
-    evaluate()
+    train_and_evaluate()
