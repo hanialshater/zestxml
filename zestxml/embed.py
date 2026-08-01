@@ -212,3 +212,91 @@ def similar_names(
         left, right = word_vector_matrices(queries, targets, vectors, device=device, dtype=dtype, log=log)
         return topk_cosine_dense(left, right, topk, min_sim)
     raise ValueError(f"unknown direct_map mode: {mode}")
+# --------------------------------------------------------------------------- #
+# label feature-bag expansion
+# --------------------------------------------------------------------------- #
+def nearest_vocab_tokens(
+    names: Sequence[str],
+    name_tokens: Sequence[Sequence[str]],
+    vocab: Sequence[str],
+    path: str,
+    topk: int = 5,
+    min_sim: float = 0.6,
+    dtype=torch.float32,
+    log=print,
+) -> Dict[str, List[str]]:
+    """For every name, its ``topk`` nearest single-word entries of ``vocab`` in vector space.
+
+    ``vocab`` is meant to be the point vocabulary ``Xf``: only its single-token entries are
+    candidates, because a label feature ``1_<t>`` is linked to the point feature ``<t>`` by
+    string equality. A name is embedded as the mean of its token vectors **only when every
+    token is known** -- averaging a partly-missing name collapses it onto its known tokens
+    and produces spurious cosine 1.00 matches (``"middleware webpack"`` == ``"middleware"``).
+    Names failing that test, and matches below ``min_sim``, are simply left out.
+
+    Returns ``{name: [extra tokens]}``, with the name's own tokens removed.
+    """
+    cands = sorted({v for v in vocab if v and " " not in v})
+    needed = set(cands) | {t for toks in name_tokens for t in toks}
+    index, table = load_word_vectors(path, dtype, vocab=needed)
+    log("label expansion: %d/%d tokens have a vector (%d vocabulary candidates)"
+        % (len(index), len(needed), sum(1 for c in cands if c in index)))
+
+    cand_words = [c for c in cands if c in index]
+    if not cand_words:
+        return {}
+    cand_mat = torch.nn.functional.normalize(
+        table[torch.tensor([index[c] for c in cand_words], dtype=torch.long)], dim=1)
+
+    rows, keep = [], []
+    for name, toks in zip(names, name_tokens):
+        toks = list(toks)
+        if toks and all(t in index for t in toks):
+            rows.append(table[torch.tensor([index[t] for t in toks], dtype=torch.long)].mean(0))
+            keep.append((name, set(toks)))
+    if not rows:
+        return {}
+    left = torch.nn.functional.normalize(torch.stack(rows), dim=1)
+
+    out: Dict[str, List[str]] = {}
+    k = min(topk + 4, len(cand_words))  # headroom for dropping the name's own tokens
+    for lo in range(0, left.shape[0], 512):
+        sims = left[lo : lo + 512] @ cand_mat.t()
+        top_val, top_idx = torch.topk(sims, k, dim=1)
+        for r in range(top_val.shape[0]):
+            name, own = keep[lo + r]
+            picked: List[str] = []
+            for v, j in zip(top_val[r].tolist(), top_idx[r].tolist()):
+                if v < min_sim:
+                    break
+                w = cand_words[j]
+                if w not in own:
+                    picked.append(w)
+                if len(picked) == topk:
+                    break
+            if picked:
+                out[name] = picked
+    return out
+
+
+
+
+def glove_expander(path: str, topk: int = 2, min_sim: float = 0.7, log=print):
+    """A ``label_expand`` callable for :func:`zestxml.dataset.build_dataset`.
+
+        build_dataset(..., label_expand=glove_expander("glove.6B.100d.txt", topk=2))
+
+    The returned callable takes the whole label set at once --
+    ``(names, name_tokens, vocab) -> {name: extra tokens}`` -- because the point
+    vocabulary it searches is only known inside ``build_dataset``, and because one
+    batched cosine over every label is far cheaper than one per label.
+
+    The defaults are the setting that measured best on GZ-Reuters-90 (k=2, floor 0.7).
+    Read the caveat in the README first: this helps when the vector space is in-domain
+    for the label names and hurts when it is not.
+    """
+
+    def expand(names: Sequence[str], name_tokens: Sequence[Sequence[str]], vocab: Sequence[str]):
+        return nearest_vocab_tokens(names, name_tokens, vocab, path, topk, min_sim, log=log)
+
+    return expand

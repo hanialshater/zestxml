@@ -336,3 +336,105 @@ split (no dev split exists here) and should be discounted; both tables are repor
    four missing Reuters configurations; put 3 seeds behind every unseen-P@1 claim.
    *Payoff:* removes two live sources of wrong conclusions in this very report.
    *Needs:* CPU, under an hour.
+
+---
+
+# Embedding hybrids (workflow `zestxml-embedding-hybrid`)
+
+Two ways of complementing the lexical zero-shot bridge with embeddings, each implemented in
+an isolated worktree, measured against a re-run control, and then handed to an adversarial
+verifier that re-evaluated every artifact and tried to refute the claim. Both verifiers
+reproduced every reported number to 0.00.
+
+## Diagnostic (why the obvious framing was wrong)
+
+| | GZ-NPM | GZ-Reuters-90 |
+| --- | --- | --- |
+| label-name tokens present in `Xf` | 89.59% | 82.88% |
+| **unseen**-label tokens present in `Xf` | **99.09%** | **100%** |
+| mean tokens per label name | 1.20 | 1.23 |
+| unseen test positives inside the control shortlist | **54.01%** | 70.93% |
+| overall shortlist recall@100 | 71.82% | 95.19% |
+
+Two things fall out. Unseen labels are already almost perfectly covered lexically — the
+lower all-label figures come from *seen* labels with rare or junk tokens, where it does not
+matter — so "expansion buys coverage" was the wrong theory. And **nearly half of npm's
+unseen positives never enter the candidate set**, which caps any hybrid that only rescores
+candidates, independently of how good the new channel is.
+
+## 1. Label feature-bag expansion — ships, opt-in
+
+`build_dataset(..., label_expand=glove_expander(...))`. Unseen-label P@1 sweep on
+GZ-Reuters-90 (control 61.28):
+
+| k | cosine floor | unseen P@1 | all P@1 | seen P@1 |
+| --- | --- | --- | --- | --- |
+| 2 | 0.5 | 67.29 | 86.09 | 94.93 |
+| **2** | **0.7** | **69.36** | **86.75** | 95.08 |
+| 5 | 0.5 | 65.60 | 86.25 | 94.89 |
+| 5 | 0.7 | 65.79 | 86.98 | 95.01 |
+
+GZ-NPM at the same k=2 / 0.7: unseen P@1 **52.11 → 44.88**, all-label 73.04 → 73.13.
+
+Verification: reproduces at seeds 0/1/2 with delta +8.08 each time against a 0.38 seed
+spread; the two arms differ in `Yf.txt` and `Y_Yf.txt` alone (byte-compared, 11 of 13 files
+identical), so the unseen label set, points and splits are shared; `Xf` is fit on training
+text only and no test data enters the expansion. Corrections the verifier made to the
+implementing agent: the seen-label cost is ≈ −0.1 across seeds, not the exact 0.00 seed 0
+shows; and the variant creates 67/532 top-1 ties on the unseen split against the control's
+2, so tie-neutral accounting gives +7.56 rather than +8.08 — the evaluator's deterministic
+order is the *pessimistic* reading for the variant. The operating point was selected on the
+test split over 4 cells; all four beat control (+4.3 / +8.1 / +4.3 / +4.5), so the expected
+gain is ≈ **+5.7 to +7.6**, not +8.08.
+
+The predictor of the sign is how widely an added feature is shared, printed by
+`build_dataset`: Reuters 1.25 labels per added feature (max 6, `wheat`/`corn`); npm 1.54
+(max 19, `example` on 19 labels, `internet` on 13). npm's shortlist recall went *up*
+(71.82 → 72.49), so the regression is entirely in scoring, not retrieval.
+
+## 2. Fused dense scoring term — refuted, does not ship
+
+`score = a·bilinear + b·knn + c·cos(enc(doc), enc(label))`, GloVe tf-idf-weighted means,
+scored only on shortlist pairs.
+
+| dataset | arm | P@1 | PSP@1 | PSP@5 | unseen P@1 |
+| --- | --- | --- | --- | --- | --- |
+| GZ-NPM | control | **73.04** | 19.10 | 28.62 | **52.11** |
+| GZ-NPM | learned fusion (a=1.00, b=0.00, c=0.00) | 72.21 | 18.33 | 25.19 | **5.27** |
+| GZ-NPM | oracle, c tuned on test | 72.85 | 19.01 | 29.95 | 32.87 |
+| GZ-Reuters-90 | control | **86.35** | 43.97 | 62.94 | **61.28** |
+| GZ-Reuters-90 | learned fusion (0.50/0.10/0.40) | 84.17 | 37.03 | 63.00 | 52.26 |
+| GZ-Reuters-90 | oracle, full simplex on test | 87.02 | 50.02 | 71.70 | 59.96 |
+
+Every honest comparison is a loss, and on npm even the test-tuned oracle stays below
+control. The controls are unusually tight: all `model/` artifacts are bit-identical to
+`Results/Npm2exact/model` and `Results/Reu2exact/model`, and the arms differ by exactly the
+fusion.
+
+Why it failed, and what to fix if it is retried:
+
+* **The fitting is structurally broken, not just badly tuned.** The validation points come
+  from the set the classifier was trained on, so validation P@1 is saturated (96.86 npm /
+  99.61 Reuters), the search reads the bilinear term as near-perfect and zeroes the `knn`
+  term — which *is* the zero-shot mechanism, hence unseen 5.27. Worse, a validation
+  shortlist built on training data contains **no unseen labels by construction**, so no
+  tuning on it can select for unseen performance. A validation split must be held out
+  before the classifier is trained, with unseen labels present.
+* **The 5.27 is a real ranking collapse, not a masking artifact.** The verifier checked the
+  matrix: 33549 non-zero entries in the 286 unseen columns, identical support to the
+  control. npm's tie-break floor is 2.49; this is above it and genuinely scored.
+* **Most of the one positive row is not the dense term.** Deleting the dense channel and
+  re-tuning only the lexical mix on standardised channels
+  (`Results/Refute2reu-nodense/score_mat.bin`) recovers 8.11 of the 8.76 PSP@5 gain and
+  1.58 of the 6.05 PSP@1 gain — at P@1 86.22, still below control. The dense channel's
+  marginal contribution under oracle conditions is +0.80 P@1, and it is unavailable without
+  test labels.
+* **Per-point standardisation is itself lossy**: the same 0.9/0.1 mix scores 86.35 raw and
+  84.47 standardised, because the cross-candidate magnitude of the `knn` term is what
+  carries unseen labels.
+
+## Where the remaining headroom is
+
+Not in rescoring. 46% of npm's unseen test positives never reach the candidate set, so the
+ceiling for any fusion or expansion that reranks a fixed shortlist is 54% unseen recall.
+Candidate generation for unseen labels is the binding constraint.

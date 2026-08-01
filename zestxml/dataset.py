@@ -108,6 +108,7 @@ def build_dataset(
     label_names: Optional[Sequence[str]] = None,
     unseen: Optional[Set[int]] = None,
     label_tokens: Callable[[str], List[str]] = default_label_tokens,
+    label_expand=None,
     label_text: Optional[Callable[[str], str]] = None,
     vectorizer=None,
     verbose: bool = True,
@@ -118,6 +119,14 @@ def build_dataset(
     features and their test positives, which is what makes them zero-shot rather than
     absent. Pass :func:`select_unseen_labels` if you want a benchmark-style split, or
     ``None`` for an ordinary dataset.
+
+    ``label_expand(names, name_tokens, vocab) -> {name: extra tokens}`` optionally widens
+    each label's feature bag beyond the words of its own name -- see
+    :func:`zestxml.embed.glove_expander`. It is called once with the whole label set and
+    the point vocabulary. Default ``None`` leaves the output byte-identical to a build
+    without the hook. Read the README before switching it on: it is worth several points
+    of unseen accuracy when the vector space is in-domain for the label names, and costs
+    as many when it is not.
 
     Returns a dict of statistics, also printed when ``verbose``.
     """
@@ -152,10 +161,14 @@ def build_dataset(
             Yf.append(name)
         return yf_id[name]
 
+    tokens_of = [label_tokens(name) for name in label_names]
+    extra = label_expand(label_names, tokens_of, Xf) if label_expand is not None else {}
+
     Y_Yf_rows, reachable = [], []
+    expanded = Counter()
     for i, name in enumerate(label_names):
         cells = {feat("__label__%d__%s" % (i, name)): 1.0}
-        toks = label_tokens(name)
+        toks = tokens_of[i]
         hit = False
         for t in toks:  # every token, in the vocabulary or not
             cells[feat("1_" + t)] = 1.0
@@ -164,6 +177,16 @@ def build_dataset(
         if len(toks) > 1:
             cells[feat("1_" + phrase)] = 1.0
             hit = hit or phrase in xf_set
+        # Extra tokens the label does not literally contain, emitted in the same "1_"
+        # namespace as its own, so an unseen label can borrow the *trained* weight of a
+        # feature that seen labels already carry rather than only the untrained knn
+        # channel. They deliberately do not count towards ``reachable``, which stays a
+        # property of the label's own text.
+        for t in extra.get(name, ()):
+            cell = feat("1_" + t)
+            if cell not in cells:
+                expanded[t] += 1
+            cells[cell] = 1.0
         Y_Yf_rows.append(sorted(cells.items()))
         reachable.append(hit)
 
@@ -202,6 +225,9 @@ def build_dataset(
         "labels": n_labels, "unseen_labels": len(unseen),
         "point_features": len(Xf), "label_features": len(Yf),
         "labels_with_reachable_text": sum(reachable),
+        "expanded_features": len(expanded),
+        "labels_per_expanded_feature": (sum(expanded.values()) / len(expanded)) if expanded else 0.0,
+        "max_labels_per_expanded_feature": max(expanded.values(), default=0),
         "train_positives": sum(len(r) for r in trn_matrix),
         "test_positives": sum(len(r) for r in tst_matrix),
         "unseen_test_positives": sum(tst_freq[i] for i in unseen),
@@ -213,6 +239,15 @@ def build_dataset(
         print(f"features    : {len(Xf)} point / {len(Yf)} label")
         print(f"label text  : {sum(reachable)}/{n_labels} labels have a token in the point vocabulary")
         print(f"positives   : {stats['train_positives']} train / {stats['test_positives']} test")
+        if expanded:
+            # How widely an added feature is shared is what decides whether expansion
+            # helps: a feature on 2 labels discriminates, one on 19 is noise. Reuters
+            # measured 1.26 labels per added feature and gained; npm 1.54 with a tail to
+            # 19 and lost. Watch this number, not the token coverage.
+            top = ", ".join("%s x%d" % kv for kv in expanded.most_common(5))
+            print(f"expansion   : {len(expanded)} added features, "
+                  f"{stats['labels_per_expanded_feature']:.2f} labels each on average "
+                  f"(max {stats['max_labels_per_expanded_feature']}); most shared: {top}")
         if unseen:
             share = 100.0 * stats["unseen_test_positives"] / max(1, stats["test_positives"])
             print(f"unseen mass : {stats['unseen_test_positives']}/{stats['test_positives']} "

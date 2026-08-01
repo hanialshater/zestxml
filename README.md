@@ -215,6 +215,105 @@ embedded when *all* of its tokens are known (averaging over a partly missing nam
 `direct_fallback` decides whether fuzzy links only fill gaps or also sit alongside exact
 matches. Augmenting is better when the vectors are good and worse when they are not.
 
+## Label feature-bag expansion (off by default)
+
+The direct map widens *retrieval*. This widens the label itself. Instead of
+
+```
+hiking  ->  {__label__7__hiking, 1_hiking}
+```
+
+each label also carries its nearest neighbours in the point vocabulary:
+
+```
+hiking  ->  {__label__7__hiking, 1_hiking, 1_trail, 1_outdoor}
+```
+
+The mechanism is different from fuzzy matching, and it is the reason this is worth doing:
+`1_trail` is a label feature that *other, seen* labels already carry, so it already has a
+**trained weight** in `W`. Adding it routes an unseen label through the learned channel
+rather than only the untrained `knn` term.
+
+```python
+from zestxml import build_dataset
+from zestxml.embed import glove_expander
+
+build_dataset(..., label_expand=glove_expander("glove.6B.100d.txt", topk=2, min_sim=0.7))
+```
+
+`label_expand(names, name_tokens, vocab) -> {name: extra tokens}` is called once with the
+whole label set and the point vocabulary — any source works, including an LLM. The default
+`None` leaves the output byte-identical to a build without the hook, which a test enforces.
+
+**It is worth a lot on one dataset and costs a lot on the other.** Unseen-label P@1,
+`glove_expander` at k=2 / floor 0.7:
+
+| | Reuters | npm |
+| --- | --- | --- |
+| control | 61.28 | **52.11** |
+| expanded | **69.36** | 44.88 |
+| all-label P@1 | 86.32 → 86.75 | 73.04 → 73.13 |
+| seen P@1 | 95.08 → 95.08 | 74.97 → 75.09 |
+| PSP@5 | 62.94 → **72.72** | 28.64 → 28.36 |
+
+Both columns are end-to-end runs through `build_dataset` and `ZestXML`, control and variant
+alike, at the reference configuration for each dataset.
+
+The Reuters gain survived being attacked: it reproduces at seeds 0/1/2 with a delta of
++8.08 every time against a seed spread of 0.38, the two arms differ in `Yf.txt` and
+`Y_Yf.txt` and nothing else (same unseen label set, same points, same shortlist size, same
+epochs), and no test data enters the expansion. Two honest deductions: the k=2/0.7
+operating point was picked on the test split over a 4-cell grid — all four cells beat
+control on unseen P@1 (+4.3 / +8.1 / +4.3 / +4.5), so the direction is not a selection
+artifact but the defensible expected gain is nearer **+5.7 to +7.6** than +8.08 — and the
+seen-label cost is about **−0.1**, not the zero that seed 0 happens to show.
+
+**What decides the sign is how widely an added feature is shared**, not vocabulary
+coverage. `build_dataset` prints it:
+
+```
+expansion : 71 added features, 1.25 labels each on average (max 6); most shared: wheat x6, corn x6, ...
+```
+
+On Reuters the neighbours are domain nouns on ~1.25 labels each. On npm they are generic
+English on 1.54 labels each with a tail to 19 — `1_example` lands on 19 labels,
+`1_internet` on 13 — because GloVe's neighbourhood of a software keyword is prose, not
+software. Those features cannot discriminate, and the unit-normalised `Y_Yf` row dilutes
+the label's own token to pay for them. Note that coverage would have told you the opposite:
+99% of npm's unseen label tokens are already in the point vocabulary, and it still loses.
+
+Retrieval is not the explanation — npm's shortlist recall went slightly *up* (71.82% →
+72.49%), so the loss is entirely in scoring. The obvious next knob is to weight expanded
+features below the label's own tokens instead of at parity, or to expand only to tokens a
+seen label already carries; neither is implemented.
+
+`benchmarks/expansion_check.py` rebuilds a dataset through `build_dataset` both ways and
+prints the two evaluations side by side, which is how the table above was produced.
+
+### What did not work: a fused dense scoring term
+
+The other obvious hybrid — adding `c * cos(enc(doc), enc(label))` as a third channel
+beside the bilinear and `knn` terms, with `(a, b, c)` fit rather than guessed — was
+implemented and measured, and **it loses on both datasets**. With the weights fit honestly
+on held-out data: npm P@1 73.04 → 72.21 and unseen 52.11 → **5.27**; Reuters 86.35 → 84.17
+and unseen 61.28 → 52.26. Even tuning the weights *on the test set* leaves npm below its
+control (72.85 vs 73.04).
+
+Two findings are worth keeping. The fitting is structurally broken for this problem: the
+validation points are the classifier's own training points, so the search sees the bilinear
+term as near-perfect (validation P@1 96.9 / 99.6), puts all the mass on it, and deletes the
+`knn` term that is the entire zero-shot mechanism — hence the 5.27. Worse, a validation
+shortlist built from training data contains **no unseen labels at all**, so no amount of
+tuning on it can ever select for the thing being measured. Fixing this needs a validation
+split held out *before* the classifier is trained, with unseen labels present in it.
+
+And most of the one positive-looking row was not the dense term: deleting the dense channel
+entirely and re-tuning only `score_alpha` on standardised channels recovers 8.11 of the
+8.76 PSP@5 "gain". Per-point standardisation itself costs P@1 (86.35 → 84.47 at the same
+0.9/0.1 mix), because the cross-candidate magnitude of the `knn` term is what carries
+unseen labels. The residual signal is that `score_alpha=0.9` may be mistuned for PSP — a
+property of the two existing channels, not of a new one.
+
 ## Validating on real data
 
 The public GZXML datasets are large Google Drive downloads. Two smaller ones can be built

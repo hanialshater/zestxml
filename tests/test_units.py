@@ -278,6 +278,48 @@ def test_build_dataset_end_to_end(tmp_path):
     assert metrics["all labels"]["points"] == 100
 
 
+def test_label_expand_adds_features_without_disturbing_the_default(tmp_path):
+    """The hook must be inert when unused, and land on exactly the labels it names."""
+    import filecmp
+    from zestxml.dataset import build_dataset
+    from zestxml.io import read_desc_file, read_text_smat
+
+    texts = ["hiking boots trail gear"] * 40 + ["camera lens tripod photo"] * 40
+    labels = [["hiking"]] * 40 + [["photography"]] * 40
+    args = dict(trn_texts=texts, trn_labels=labels, tst_texts=texts, tst_labels=labels,
+                label_names=["hiking", "photography"], verbose=False)
+
+    plain = str(tmp_path / "plain")
+    build_dataset(plain, **args)
+
+    # default None is byte-identical, so switching the feature on is opt-in in the
+    # strongest sense: an existing pipeline cannot drift by upgrading
+    again = str(tmp_path / "again")
+    build_dataset(again, label_expand=None, **args)
+    same, diff, err = filecmp.cmpfiles(plain, again, os.listdir(plain), shallow=False)
+    assert not diff and not err, f"label_expand=None changed {diff + err}"
+
+    # the hook sees the whole label set and the point vocabulary, and only widens the
+    # labels it returns
+    seen = {}
+
+    def expander(names, name_tokens, vocab):
+        seen["names"], seen["vocab"] = list(names), set(vocab)
+        return {"hiking": ["trail"]}
+
+    wide = str(tmp_path / "wide")
+    stats = build_dataset(wide, label_expand=expander, **args)
+    assert seen["names"] == ["hiking", "photography"] and "trail" in seen["vocab"]
+    assert stats["expanded_features"] == 1 and stats["max_labels_per_expanded_feature"] == 1
+
+    yf = read_desc_file(f"{wide}/Yf.txt")
+    trail = yf.index("1_trail")
+    rows = read_text_smat(f"{wide}/Y_Yf.txt")
+    carries = [r for r in range(rows.nrows)
+               if trail in rows.indices[rows.indptr[r]:rows.indptr[r + 1]].tolist()]
+    assert carries == [0], "1_trail must land on hiking and on no other label"
+
+
 def test_api_rejects_unknown_parameters():
     """A misspelled hyper-parameter must fail loudly, not be silently ignored."""
     from zestxml import ZestXML
