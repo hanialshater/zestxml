@@ -98,6 +98,41 @@ Flags kept for compatibility but inert: `-F` (only used by the approximate short
 because `create_Xf_Yf_map` binarises `trn_X_Y` after `ips_weight` has written to it.
 `-bilinear_add_bias 1` is rejected rather than silently ignored; no run script uses it.
 
+### Applying it to your own data
+`zestxml.dataset.build_dataset` turns raw texts and labels into a dataset directory that
+`run_torch.py`, `tools/eval_xc.py` and encoder baselines such as Renee all read:
+
+```python
+from zestxml.dataset import build_dataset, select_unseen_labels
+
+build_dataset(
+    "GZXML-Datasets/MyData",
+    trn_texts=["hiking boots waterproof", ...],   # one string per training point
+    trn_labels=[["hiking", "outdoors"], ...],     # label names per point
+    tst_texts=[...], tst_labels=[...],
+    unseen=None,        # or select_unseen_labels(...) for a zero-shot split
+)
+```
+
+Then train and predict as usual with `run_torch.py -type all`.
+
+It exists because the conventions are not obvious and are easy to get wrong:
+
+* Each label becomes a bag of features -- `1_<token>` per token of its name, plus one
+  unique `__label__<i>__<name>`. The `1_` prefix is load-bearing: the direct map strips
+  everything up to the first underscore and looks the rest up in the point vocabulary,
+  which is the only way a label with no training example is reachable.
+* **Every** token is emitted, in the document vocabulary or not. Emitting only matched
+  tokens makes every label trivially matchable and deletes the population that zero-shot
+  is about.
+* Text files are verified to stay row-aligned with the matrices after being written and
+  read back, because a stray `\r` inside a description silently becomes an extra row --
+  and Renee, for one, maps line N to row N without ever checking.
+* tf-idf is fit on training text only.
+
+`tools/make_reuters.py` and `tools/make_npm.py` are worked examples; the API reproduces
+both datasets byte for byte.
+
 ### Fuzzy label-to-document matching (off by default)
 The direct map is the only bridge an unseen label has to the document vocabulary, and in
 the reference it is *string equality*: `acq` never reaches `acquisition`. `-direct_map`

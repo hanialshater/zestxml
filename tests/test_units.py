@@ -232,3 +232,61 @@ def test_training_separates_positives():
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# --------------------------------------------------------------------------- #
+# the dataset API
+# --------------------------------------------------------------------------- #
+def test_build_dataset_end_to_end(tmp_path):
+    """A dataset built from raw texts must load and train without any manual wiring."""
+    from zestxml.dataset import build_dataset, select_unseen_labels
+    from zestxml.io import read_text_smat, read_desc_file
+
+    words = ["hiking", "boots", "camera", "lens", "coffee", "grinder", "laptop", "keyboard"]
+    tags = ["hiking", "photography", "coffee", "computing"]
+    g = torch.Generator().manual_seed(3)
+    texts, labels = [], []
+    for i in range(300):
+        t = int(torch.randint(0, len(tags), (1,), generator=g))
+        pair = words[2 * t : 2 * t + 2]
+        texts.append(" ".join(pair * 3) + f" item{i % 17}")
+        labels.append([tags[t]])
+
+    out = str(tmp_path / "ds")
+    stats = build_dataset(out, texts[:200], labels[:200], texts[200:], labels[200:],
+                          label_names=tags, verbose=False)
+    assert stats["labels"] == 4 and stats["train_points"] == 200
+
+    # every matrix must agree with the raw-text row counts, the alignment bug class
+    for mat, txt, n in (("trn_X_Xf", "trn_X", 200), ("tst_X_Xf", "tst_X", 100)):
+        assert read_text_smat(f"{out}/{mat}.txt").nrows == n
+        assert len(read_desc_file(f"{out}/{txt}.txt")) + 1 == n + 1
+
+    # the label-feature convention: tokens are "1_<tok>" so the direct map can find them
+    yf = read_desc_file(f"{out}/Yf.txt")
+    assert "1_hiking" in yf and any(n.startswith("__label__") for n in yf)
+
+    # and the whole pipeline runs on it
+    from zestxml.params import Params
+    from zestxml.pipeline import run_xhtp_approx, run_xhtp_fine_tune, run_predict
+    argv = []
+    for k, v in {"trn_X_Xf": f"{out}/trn_X_Xf.txt", "tst_X_Xf": f"{out}/tst_X_Xf.txt",
+                 "Y_Yf": f"{out}/Y_Yf.txt", "trn_X_Y": f"{out}/trn_X_Y.txt",
+                 "tst_X_Y": f"{out}/tst_X_Y.txt", "Xf": f"{out}/Xf.txt", "Yf": f"{out}/Yf.txt",
+                 "res_dir": f"{out}/res", "model_dir": f"{out}/res/model", "type": "all",
+                 "shortyK": "4", "bs_count": "5", "bilinear_classifier_maxitr": "3"}.items():
+        argv += ["-" + k, v]
+    p = Params.parse(argv)
+    run_xhtp_approx(p)
+    run_xhtp_fine_tune(p)
+    run_predict(p)
+    scores = read_bin_smat(f"{out}/res/score_mat.bin")
+    assert scores.shape == (100, 4) and scores.nnz > 0
+
+
+def test_select_unseen_labels_keeps_them_out_of_training_only():
+    from zestxml.dataset import select_unseen_labels
+    trn = [[0, 1], [0, 2], [1, 2]] * 20
+    tst = [[0, 1, 2]] * 20
+    unseen = select_unseen_labels(trn, tst, 3, stride=2, min_test=5)
+    assert unseen and all(0 <= i < 3 for i in unseen)

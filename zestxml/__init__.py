@@ -7,6 +7,7 @@ primal objective instead of liblinear's dual coordinate descent.
 """
 
 from .csr import CSR
+from .dataset import build_dataset, select_unseen_labels
 from .model import BilinearClassifier, BilinearPattern, get_shortlist, pair_scores, pair_targets
 from .params import Params
 from .pattern import build_sparsity_pattern, union_pattern
@@ -17,7 +18,9 @@ __all__ = [
     "BilinearClassifier",
     "BilinearPattern",
     "Params",
+    "build_dataset",
     "build_sparsity_pattern",
+    "select_unseen_labels",
     "get_shortlist",
     "main",
     "pair_scores",
