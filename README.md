@@ -396,6 +396,25 @@ conventions against a rebuilt directory, and the public API end to end. The C++ 
 suite that validated the original port has been removed along with the C++; its findings
 are recorded above.
 
+`tests/regression_check.py` is the separate check that a change did not move the numbers.
+It reads a recorded run's `params.txt`, re-runs it with the current code, and diffs the
+score matrices rather than only the metrics — two runs can agree on P@1 while disagreeing
+across most of the matrix.
+
+```shell
+python tests/regression_check.py Results/Npm2exact Results/Regress-npm
+```
+
+It needs a real dataset and a recorded run, so it is not part of the pytest suite.
+
+**Training is only bit-reproducible at `num_thread=1`.** Above that, torch's CPU reductions
+accumulate in nondeterministic order and the difference compounds across Adam steps: two
+runs of identical code on identical data land up to 6e-2 apart in the *bilinear* scores and
+up to 0.011 apart in the metrics. The mined pattern, the shortlist and the untrained `knn`
+term are bit-identical regardless, so a difference in any of those is a real regression,
+and that is what the check keys on. Set `num_thread=1` when you need an exact byte-level
+comparison; the run is slower but repeatable.
+
 ## Public datasets
 
 Used in the paper, all downloadable [here](https://drive.google.com/file/d/1Cyi40UP9b527DiPrfJuvqmwm8OUUii0o/view?usp=sharing):
