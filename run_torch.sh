@@ -1,5 +1,5 @@
 #!/bin/bash
-# PyTorch counterpart of run.sh: ./run_torch.sh <dataset> <train|predict|all> [extra args]
+# ./run_torch.sh <dataset> <train|predict|all> [extra args]
 dataset=$1
 type=$2
 extra_args="${@:3}"

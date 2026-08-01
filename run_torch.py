@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PyTorch entry point, argument compatible with the C++ ``./run``.
+"""PyTorch entry point.
 
     python run_torch.py -trn_X_Xf ... -type all
 """
