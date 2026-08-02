@@ -641,8 +641,30 @@ GZ-Reuters-90, keeping 78% (min_sim 0.15) and 66% (0.30) of the pattern:
 | 0.15 | 86.25 | 61.82 | 60.15 | **95.27** |
 | 0.30 | 86.25 | 60.47 | 59.77 | **95.27** |
 
-It trades unseen accuracy for seen accuracy and does not pay for itself here -- co-occurrence
-was already choosing the right pairs. The efficiency argument only bites on a large pattern.
+On Reuters it trades unseen accuracy for seen accuracy and does not pay for itself.
+
+**On GZ-NPM it is the largest overall gain measured anywhere in this repo**, and it inverts
+the Reuters conclusion. Keeping 73% of the pattern (min_sim 0.30, 174649 of 470401 entries
+judgeable):
+
+| min_sim | P@1 | P@5 | PSP@5 | unseen P@1 | seen P@1 |
+|---|---|---|---|---|---|
+| 0.00 (control) | 73.02 | 40.71 | 28.67 | **52.07** | 74.95 |
+| 0.15 | 73.88 | 41.03 | 28.82 | **52.19** | 75.84 |
+| **0.30** | **74.57** | **41.19** | 28.87 | 52.13 | **76.56** |
+
+Measured on a GPU box and reproduced independently here on CPU to within 0.02 (73.05 ->
+74.59, seen 74.98 -> 76.58). **+1.55 P@1 and +1.61 seen P@1**, with the unseen split
+unchanged -- so this makes the model better, not more zero-shot. Note that 0.30 beats 0.15,
+so the sweep has not found its optimum.
+
+Why npm and not Reuters: Reuters mines 284K pattern entries over 90 labels, npm 470K over
+3223. `bs_count` keeps the top-k label features per point feature by co-occurrence alone,
+and on the larger and sparser label space many of those slots go to pairs that co-occur
+without being related. Removing them frees budget that was being spent on noise. The
+conclusion first recorded here -- "co-occurrence was already choosing the right pairs" --
+was drawn from Reuters alone and is wrong on any label space large enough for the pattern
+budget to bind.
 
 ## A measurement error worth recording
 
@@ -652,3 +674,22 @@ those 75 ids are all valid indices into npm's 3223 labels, so nothing complained
 labels with real training data were treated as unseen. Shortlist recall matched the
 reference *exactly* -- only scoring was wrong -- which is what made it survive a first
 glance. The pipeline now rejects a seen-labels cache that disagrees with `trn_X_Y`.
+
+
+## Label expansion: GloVe beats modern encoders
+
+Same mechanism, same k=2 and cosine floor 0.7, three encoders, GZ-Reuters-90:
+
+| expander | P@1 | PSP@5 | unseen P@1 | seen P@1 |
+|---|---|---|---|---|
+| **GloVe-100d** | **86.72** | **72.47** | **69.74** | 95.04 |
+| all-MiniLM-L6-v2 | 86.22 | 63.51 | 63.35 | **95.12** |
+| control (no expansion) | 86.35 | 62.94 | 61.28 | 95.04 |
+| clip-ViT-B-32 | 85.62 | 62.65 | 58.46 | 94.93 |
+
+A 2014 word-vector table beats a modern sentence encoder by 6.4 points of unseen P@1, and
+CLIP is worse than no expansion at all. The likely cause is that the cosine floor does not
+transfer: transformer embedding spaces are anisotropic, so 0.7 is selective for GloVe and
+permissive for MiniLM, admitting more and looser neighbours. That is a *threshold* result
+rather than an encoder result, and the sweep that would separate them was lost to a
+directory-naming collision (both floors wrote to the same tag) -- fixed, not yet re-run.

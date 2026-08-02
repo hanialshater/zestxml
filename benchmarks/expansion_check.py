@@ -67,8 +67,11 @@ def main(data_dir, vectors, topk=2, min_sim=0.7, **overrides):
     for arm, expander in (("control", None),
                           (f"expand k={topk} floor={min_sim}",
                            expander_for(vectors, int(topk), float(min_sim)))):
+        # the sweep settings have to be in the tag: without them, k=2/0.5 and k=2/0.7 write
+        # to the same directory and the second silently overwrites the first
         short = os.path.basename(str(vectors)).split(".")[0]
-        tag = f"ExpCheck-{tag_of}-" + ("ctrl" if expander is None else f"wide-{short}")
+        tag = f"ExpCheck-{tag_of}-" + ("ctrl" if expander is None
+                                       else f"wide-{short}-k{topk}-f{min_sim}")
         print(f"--- {arm} " + "-" * 50)
         build_dataset(f"GZXML-Datasets/{tag}", trn_x, trn_y, tst_x, tst_y,
                       label_names=names, unseen=unseen, label_expand=expander)
