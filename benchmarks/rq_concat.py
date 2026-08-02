@@ -82,7 +82,7 @@ def main(argv=None):
                     help="emit coarse-to-fine PREFIX TUPLES (rq0_a, rq01_a-b, rq012_a-b-c, ...) "
                          "instead of L independent marginals. The identity of an item lives in "
                          "the conjunction of its codes -- on GZ-Reuters-90 the 87 coded labels "
-                         "occupy 18 distinct level-0 cells but 80 distinct full tuples -- so "
+                         "occupy 18 distinct level-0 cells but 80-85 distinct full tuples -- so "
                          "emitting only marginals throws away what residual quantization built.")
     args = ap.parse_args(argv)
 
