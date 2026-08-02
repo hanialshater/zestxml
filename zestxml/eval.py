@@ -106,6 +106,19 @@ def report(
     truth = read_text_smat(f"{data_dir}/{split}_X_Y.txt")
     trn = read_text_smat(f"{data_dir}/trn_X_Y.txt")
     if isinstance(scores, str):
+        # Two splits of the same dataset often have the same number of points, so a shape
+        # check cannot tell you that a score matrix belongs to a different one -- scoring
+        # test predictions against validation labels passes silently and reads as a
+        # catastrophic result. The run's params.txt records which split it predicted.
+        params = os.path.join(os.path.dirname(scores), "params.txt")
+        if os.path.exists(params):
+            for line in open(params):
+                if line.startswith("tst_X_Y "):
+                    got = os.path.basename(line.split(None, 1)[1].strip())
+                    if got not in ("-", f"{split}_X_Y.txt") and verbose:
+                        print(f"WARNING: {scores} was predicted against {got}, but you are "
+                              f"scoring it against {split}_X_Y.txt. Re-run predict with "
+                              f"-tst_X_Xf {data_dir}/{split}_X_Xf.txt to score this split.")
         scores = read_bin_smat(scores)
     if isinstance(scores, CSR):
         assert scores.shape == truth.shape, f"{scores.shape} != {truth.shape}"
