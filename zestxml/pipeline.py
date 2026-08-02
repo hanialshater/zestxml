@@ -175,6 +175,9 @@ def run_xhtp_fine_tune(params: Params) -> None:
     Y_Yf = _load(params.path("Y_Yf"), device, dtype)
     trn_X_Y = _load(params.path("trn_X_Y"), device, dtype)
 
+    Xf = read_desc_file(params.path("Xf"))
+    Yf = read_desc_file(params.path("Yf"))
+
     log("loading sparsity pattern mat from model dir")
     sparsity_pattern = read_bin_smat(model_dir + SEP + "sparsity_pattern.bin", device, dtype)
     Xf_Yf = read_bin_smat(model_dir + SEP + "Xf_Yf.bin", device, dtype)
@@ -227,6 +230,7 @@ def run_xhtp_fine_tune(params: Params) -> None:
         log("[STAT] : nnz in assign_mat : %d" % shortlist.nnz)
         log("[STAT] : num parameters : %d" % (pattern.size + 1))
 
+        pursuit = _pursuit(params, pattern, Xf, Yf, device, log)
         targets = pair_targets(shortlist, trn_X_Y)
         clf.fit(
             trn_X_Xf,
@@ -239,12 +243,40 @@ def run_xhtp_fine_tune(params: Params) -> None:
             max_elems=params.int("max_elems"),
             seed=params.int("seed"),
             log=log,
+            pursuit=pursuit,
         )
+        if pursuit is not None:
+            log("[STAT] : %s" % pursuit.stats())
         clf.training_report(trn_X_Xf, Y_Yf, shortlist, targets, params.int("max_elems"), log=log)
 
         # same layout as the C++ model: the pattern weights followed by the bias
         weights = np.concatenate([clf.weights.cpu().numpy(), clf.bias.cpu().numpy()])
         write_bin_vec(weights, model_dir + SEP + "bilinear_clf.bin")
+
+
+def _pursuit(params, pattern, Xf, Yf, device, log):
+    """Build the structured-pursuit masker, or None when it is switched off."""
+    if not params.given("pursuit_vectors") or params.float("pursuit_budget") <= 0:
+        return None
+    from .pursuit import StructuredPursuit, code_features, sid_block_index
+
+    log("\nstructured hard pursuit over semantic-ID prefix blocks")
+    x_codes, y_codes = code_features(
+        Xf, Yf, params.path("pursuit_vectors"), levels=params.int("pursuit_levels"),
+        codebook_size=params.int("pursuit_codebook"), seed=params.int("seed"), log=log)
+    blocks = sid_block_index(pattern, Yf, y_codes, x_codes, side=params.str("pursuit_side"),
+                             keep_identity=params.bool("pursuit_keep_identity"))
+    log("  blocks per level: %s (%d slots, %.1f%% with a coded label feature, "
+        "%d exempt identity slots)"
+        % (blocks.counts(), blocks.n_slots, 100.0 * blocks.coded_frac,
+           int(blocks.always.sum())))
+    caps = None
+    if params.given("pursuit_level_budgets"):
+        caps = [float(v) for v in params.str("pursuit_level_budgets").split(",")]
+    return StructuredPursuit(
+        blocks, budget=params.float("pursuit_budget"),
+        interval=params.int("pursuit_interval"), explore=params.float("pursuit_explore"),
+        level_budgets=caps, log=log)
 
 
 # --------------------------------------------------------------------------- #

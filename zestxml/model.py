@@ -293,7 +293,10 @@ class BilinearClassifier:
     ) -> Tuple[Tensor, Tensor]:
         """Margins for the pairs of ``points`` plus their global pair ids."""
         pos, owner = self._batch_pairs(pairs, points)
-        margin = pair_scores(self.weights, self.pattern, X, Y, points, owner, pairs.indices[pos])
+        # under structured pursuit the forward uses masked weights while the backward pass
+        # still reaches every slot, so an inactive block keeps an importance signal
+        w = self.weights if getattr(self, "_eff", None) is None else self._eff
+        margin = pair_scores(w, self.pattern, X, Y, points, owner, pairs.indices[pos])
         if self.normalize:
             margin = margin / norms[pos]
         return margin + self.bias, pos
@@ -345,6 +348,7 @@ class BilinearClassifier:
         max_elems: int = 1 << 24,
         seed: int = 0,
         log=print,
+        pursuit=None,
     ) -> None:
         device = X.device
         generator = torch.Generator(device="cpu").manual_seed(seed)
@@ -364,6 +368,8 @@ class BilinearClassifier:
             order = torch.randperm(X.nrows, generator=generator).to(device)
             total, seen = 0.0, 0
             for points in batch_points(X, self.pattern, order, max_elems, batch_size):
+                if pursuit is not None:
+                    self._eff = pursuit.hook(self.weights * pursuit.mask)
                 margin, pos = self.score_pairs(X, Y, pairs, points, norms)
                 if margin.numel() == 0:
                     continue
@@ -375,10 +381,21 @@ class BilinearClassifier:
                 loss.backward()
                 opt.step()
 
+                if pursuit is not None:
+                    self.weights.data.mul_(pursuit.mask)  # keep masked slots exactly zero
                 total += float(data_term.detach()) + float(reg.detach())
                 seen += margin.numel()
             log(f"  epoch {epoch + 1}/{epochs} objective {total:.4f} over {seen} pairs")
+            # prune on the epoch *after* the gradient accumulator has something in it, and
+            # never on the last one -- a mask change with no epochs left to adapt to it is
+            # a strictly worse model than the same mask applied one round earlier
+            if (pursuit is not None and (epoch + 1) % pursuit.interval == 0
+                    and epoch + 1 < epochs):
+                pursuit.step(self.weights, epoch=epoch + 1, epochs=epochs)
 
+        self._eff = None
+        if pursuit is not None:
+            self.weights.data.mul_(pursuit.mask)
         self.weights.requires_grad_(False)
         self.bias.requires_grad_(False)
 

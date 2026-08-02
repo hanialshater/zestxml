@@ -32,6 +32,18 @@ DEFAULTS: Dict[str, str] = {
     # ---- semantic pruning of the mined pattern -------------------------------
     "prune_vectors": "-",  # vectors/model used to score how related a mined (xf, yf) pair is
     "prune_min_sim": "0.0",  # drop pattern entries below this cosine; 0 disables pruning
+    # structured hard pursuit: prune whole semantic-ID prefix blocks of the pattern during
+    # training, on learned weight magnitude, with ancestor closure and gradient revival
+    "pursuit_vectors": "-",  # vectors/model used to give each label feature a code path
+    "pursuit_budget": "0.0",  # fraction of prunable slots to keep; 0 disables pursuit
+    "pursuit_levels": "3",
+    "pursuit_codebook": "64",
+    "pursuit_interval": "4",  # prune every this many epochs
+    "pursuit_explore": "0.3",  # drop-and-grow rate, cosine-decayed to zero
+    "pursuit_level_budgets": "-",  # optional per-level block caps, e.g. "32,512,4096"
+    "pursuit_side": "xy",  # block key: "xy" both sides coded, "y" label side only,
+                           # "xf_y" raw xf x label prefix (degenerate, kept as a control)
+    "pursuit_keep_identity": "1",  # exempt __label__ features (the per-label residual)
     # ---- shortlist -----------------------------------------------------------
     "shortyK": "100",
     "shortlist_file": "-",  # test-time candidate set, instead of generating one
