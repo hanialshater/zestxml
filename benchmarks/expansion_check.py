@@ -1,6 +1,7 @@
 """End-to-end check of label feature-bag expansion *through* ``build_dataset``.
 
     python benchmarks/expansion_check.py GZXML-Datasets/GZ-Reuters-90 <glove.txt>
+    python benchmarks/expansion_check.py GZXML-Datasets/GZ-Reuters-90 all-MiniLM-L6-v2
     python benchmarks/expansion_check.py GZXML-Datasets/GZ-NPM <glove.txt> shortyK=100 bs_count=40
 
 The measured sweep that produced the numbers in the README rewrote ``Yf.txt`` and
@@ -22,7 +23,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from zestxml import ZestXML, build_dataset  # noqa: E402
-from zestxml.embed import glove_expander  # noqa: E402
+from zestxml.embed import glove_expander, st_expander  # noqa: E402
 from zestxml.io import read_desc_file, read_text_smat  # noqa: E402
 
 # the reference configuration for GZ-Reuters-90 (Results/Reu2exact/params.txt)
@@ -49,6 +50,13 @@ def load(data_dir):
             names, unseen)
 
 
+def expander_for(source, topk, min_sim):
+    """A GloVe file path, or anything else read as a sentence-transformers model name."""
+    if os.path.exists(source):
+        return glove_expander(source, topk=topk, min_sim=min_sim)
+    return st_expander(source, topk=topk, min_sim=min_sim)
+
+
 def main(data_dir, vectors, topk=2, min_sim=0.7, **overrides):
     config = {**CONFIG, **overrides}
     tag_of = os.path.basename(data_dir.rstrip('/'))
@@ -58,8 +66,9 @@ def main(data_dir, vectors, topk=2, min_sim=0.7, **overrides):
     out = {}
     for arm, expander in (("control", None),
                           (f"expand k={topk} floor={min_sim}",
-                           glove_expander(vectors, topk=topk, min_sim=min_sim))):
-        tag = f"ExpCheck-{tag_of}-" + ("ctrl" if expander is None else "wide")
+                           expander_for(vectors, int(topk), float(min_sim)))):
+        short = os.path.basename(str(vectors)).split(".")[0]
+        tag = f"ExpCheck-{tag_of}-" + ("ctrl" if expander is None else f"wide-{short}")
         print(f"--- {arm} " + "-" * 50)
         build_dataset(f"GZXML-Datasets/{tag}", trn_x, trn_y, tst_x, tst_y,
                       label_names=names, unseen=unseen, label_expand=expander)
@@ -75,5 +84,13 @@ def main(data_dir, vectors, topk=2, min_sim=0.7, **overrides):
 
 
 if __name__ == "__main__":
-    kw = dict(a.split("=", 1) for a in sys.argv[3:])
+    # trailing args: bare values fill topk and min_sim in order, key=value ones override
+    # the run configuration -- e.g. "... glove.gz 2 0.7 shortyK=100 bs_count=40"
+    rest = sys.argv[3:]
+    pos = [a for a in rest if "=" not in a]
+    kw = dict(a.split("=", 1) for a in rest if "=" in a)
+    if len(pos) > 0:
+        kw["topk"] = int(pos[0])
+    if len(pos) > 1:
+        kw["min_sim"] = float(pos[1])
     main(sys.argv[1], sys.argv[2], **kw)

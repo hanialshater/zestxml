@@ -39,6 +39,8 @@ RUNS = {
         ("dense_probe", "dense probe, Numberbatch"),
         # produced by benchmarks/colab/ZestXML_benchmarks.ipynb, on a GPU box
         ("renee", "Renee (end-to-end encoder)"),
+        ("npm-reference", "ZestXML (notebook run)"),
+        ("npm-directmap", "+ GloVe direct map (notebook)"),
         ("npm-dense", "dense probe, MiniLM-L6"),
         ("npm-hybrid", "ZestXML on a hybrid shortlist"),
         ("splade-both", "SPLADE, no label id, normalised"),
@@ -55,6 +57,10 @@ RUNS = {
         ("classicalR-knn25", "kNN k=25"),
         ("classicalR-centroid", "tf-idf centroid"),
         ("ova_linear_reuters", "OVA linear (1-vs-all)"),
+        ("reu-reference", "ZestXML (notebook run)"),
+        ("reu-directmap", "+ GloVe direct map (notebook)"),
+        ("ExpCheck-GZ-Reuters-90-ctrl", "ZestXML, rebuilt control"),
+        ("ExpCheck-GZ-Reuters-90-wide", "+ label expansion k=2/0.7"),
     ],
 }
 
@@ -79,6 +85,8 @@ def collect(dataset, results="Results", scan=False):
     for run, label in (discover(dataset, results) if scan else RUNS[dataset]):
         path = f"{results}/{run}/score_mat.bin"
         if not os.path.exists(path):
+            # Results/ is gitignored, so a fresh checkout has none of the recorded runs.
+            # Under --scan that is the normal case, not a problem worth 13 lines about it.
             skipped.append((label, "no artifact"))
             continue
         if read_bin_smat(path).shape != shape:
@@ -106,8 +114,12 @@ def main(dataset, markdown=False, results="Results", scan=False):
         print("%-34s " % "method" + " ".join("%11s" % h for h in HEAD))
         for label, _, vals in rows:
             print("%-34s " % label + " ".join("%11.2f" % v for v in vals))
-    for label, why in skipped:
-        print(f"\nskipped: {label} ({why})")
+    if skipped and scan:
+        print(f"\n({len(skipped)} recorded runs not present in {results}/ — expected on a "
+              f"fresh checkout, which starts with no Results/)")
+    else:
+        for label, why in skipped:
+            print(f"\nskipped: {label} ({why})")
 
 
 if __name__ == "__main__":

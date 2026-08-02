@@ -300,3 +300,56 @@ def glove_expander(path: str, topk: int = 2, min_sim: float = 0.7, log=print):
         return nearest_vocab_tokens(names, name_tokens, vocab, path, topk, min_sim, log=log)
 
     return expand
+
+
+def st_expander(model: str = "sentence-transformers/all-MiniLM-L6-v2",
+                topk: int = 2, min_sim: float = 0.7, batch_size: int = 512, log=print):
+    """:func:`glove_expander`, but with a sentence-transformers encoder.
+
+        build_dataset(..., label_expand=st_expander("all-MiniLM-L6-v2", topk=2, min_sim=0.5))
+
+    Same contract -- ``(names, name_tokens, vocab) -> {name: extra tokens}`` -- and the same
+    candidate rule: only single-word entries of the point vocabulary, because a label
+    feature ``1_<t>`` reaches the point feature ``<t>`` by string equality. Unlike the GloVe
+    path there is no out-of-vocabulary rule to get wrong; the encoder embeds every name.
+
+    **``min_sim`` does not transfer across encoders.** Transformer embedding spaces are
+    anisotropic -- cosines between unrelated items sit far above zero -- so a floor of 0.7,
+    which is selective for GloVe, can admit almost everything here. Judge a setting by the
+    expansion statistics ``build_dataset`` prints, not by the number: what decided the sign
+    in every measured run is how many labels each added feature lands on (1.25 gained 8
+    points on Reuters, 1.54 with a tail to 19 lost 7 on npm).
+    """
+    from sentence_transformers import SentenceTransformer
+
+    def expand(names, name_tokens, vocab):
+        cands = sorted({v for v in vocab if v and " " not in v})
+        if not cands:
+            return {}
+        enc = SentenceTransformer(model)
+        log("expander: encoding %d vocabulary candidates and %d names with %s"
+            % (len(cands), len(names), model))
+        cvec = torch.as_tensor(enc.encode(cands, batch_size=batch_size, convert_to_numpy=True,
+                                          normalize_embeddings=True, show_progress_bar=False))
+        nvec = torch.as_tensor(enc.encode(list(names), batch_size=batch_size, convert_to_numpy=True,
+                                          normalize_embeddings=True, show_progress_bar=False))
+        out: Dict[str, List[str]] = {}
+        k = min(topk + 4, len(cands))  # headroom for dropping the name's own tokens
+        for lo in range(0, nvec.shape[0], 512):
+            val, idx = torch.topk(nvec[lo : lo + 512] @ cvec.t(), k, dim=1)
+            for r in range(val.shape[0]):
+                name = names[lo + r]
+                own = set(name_tokens[lo + r])
+                picked = []
+                for v, j in zip(val[r].tolist(), idx[r].tolist()):
+                    if v < min_sim:
+                        break
+                    if cands[j] not in own:
+                        picked.append(cands[j])
+                    if len(picked) == topk:
+                        break
+                if picked:
+                    out[name] = picked
+        return out
+
+    return expand

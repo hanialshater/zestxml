@@ -543,6 +543,41 @@ measurement. The test that would settle it: restrict to labels whose tokens are 
 from `Xf` and see whether rq codes help there. On these two datasets that subpopulation is
 almost empty, which is precisely the point.
 
+## Transformer encoders — the limitation was not the encoder
+
+Everything above used GloVe means, which had a real defect: documents averaged over 200
+tokens, label names over one or two, so the two sides sat in different regions and label
+names were then quantized against *document*-cluster centroids. The obvious suspicion was
+that this, rather than the idea, produced the negative result. Stage 7 of
+`benchmarks/colab/ZestXML_benchmarks.ipynb` tests it on a GPU box with one encoder for both
+sides and no out-of-vocabulary drops. GZ-Reuters-90:
+
+| arm | P@1 | PSP@5 | unseen P@1 | seen P@1 | unseen recall |
+|---|---|---|---|---|---|
+| control (lexical) | **86.35** | **62.94** | 61.28 | 95.04 | 70.76 |
+| all-MiniLM-L6-v2 @ 10% mass | 86.05 | 62.38 | 59.59 | 94.74 | 77.24 |
+| all-MiniLM-L6-v2 @ 25% | 85.66 | 58.40 | 55.64 | 94.78 | 75.58 |
+| clip-ViT-B-32 @ 10% | 85.92 | 61.04 | **61.84** | **95.12** | 77.41 |
+| clip-ViT-B-32 @ 25% | 85.69 | 56.44 | 48.68 | 95.08 | 78.74 |
+
+The bar, set before the run: an unseen P@1 gain larger than ~1 point. Nothing clears it —
+the best is CLIP at 10% mass, **+0.56**, a single-seed reading barely outside the 0.38 seed
+spread. **MiniLM, a strictly stronger text encoder, does worse than GloVe** at the same mass
+(−1.69 against −0.38), which refutes the asymmetry hypothesis outright. The same monotone
+cliff in mass reappears (10% → 25% costs 4–13 points of unseen P@1), and unseen recall rises
+again (70.8 → 77–79) without converting — the third independent confirmation, after rq
+shortlists and MiniLM dense retrieval.
+
+The cost is visible in the run logs: the sparsity pattern grows from 284,540 to 512,753
+non-zeros. Double the parameters, no gain.
+
+One result worth keeping for its own sake: **CLIP beats MiniLM on unseen labels despite
+being much the weaker text encoder here** — its 77-token window truncates these documents
+hard. A plausible reason, untested, is that CLIP's text tower is trained on short captions
+and so embeds one- and two-word label names in a space that suits them, while a MiniLM
+embedding of a 200-token news article encodes register more than topic. If a semantic
+channel is ever wanted on the label side, that is the lead to follow.
+
 ## Unaddressed
 
 The npm null is diluted by 697 labels that received no code at all, and was never split
