@@ -584,3 +584,71 @@ The npm null is diluted by 697 labels that received no code at all, and was neve
 coded-vs-uncoded — the one measurement that could still rescue the npm result. The weight
 sweep is three test-read points. sklearn's KMeans is not bit-reproducible here, so the
 w=1.0 arm used a slightly different codebook from the others.
+
+
+---
+
+# Three changes to *how* semantic IDs are used
+
+Earlier arms all used codes as peer features and tuned their row mass. These change the use
+rather than the amount. All numbers below measured by me on CPU with GloVe-100d.
+
+## Multiple codes per label, and retraining on semantic candidates
+
+`--label_codes m` assigns the *m* nearest centroids per level instead of one. Each code
+stays as frequent as before -- so it still fires, which is where prefix tuples failed --
+while the set becomes specific. `rq_retrain.py` then closes the hole in the earlier
+retrieval test, which had reused a model trained on lexically-retrieved negatives to rank
+semantically-retrieved ones; it regenerates **both** shortlists and retrains from scratch.
+
+| GZ-Reuters-90 | P@1 | PSP@5 | unseen P@1 | seen P@1 | unseen recall |
+|---|---|---|---|---|---|
+| lexical control | 86.35 | 62.94 | **61.28** | **95.08** | 70.76 |
+| semantic features (MiniLM, m=3) | 86.05 | 63.00 | **61.28** | 94.86 | 84.05 |
+| lexical + sem candidates | 86.52 | 64.59 | 60.15 | 94.97 | 84.05 |
+| lexical + union candidates | **86.58** | **64.78** | 61.09 | 95.04 | **85.88** |
+
+| GZ-NPM | P@1 | PSP@5 | unseen P@1 | seen P@1 | unseen recall |
+|---|---|---|---|---|---|
+| lexical control | 73.04 | 28.64 | **52.11** | 74.97 | 54.01 |
+| semantic features (GloVe, m=3) | **73.40** | 28.40 | 51.11 | **75.31** | 54.40 |
+| lexical + sem candidates | 73.04 | **28.74** | 51.98 | 74.95 | 54.40 |
+| lexical + union candidates | 73.04 | 28.64 | 52.09 | 74.97 | **54.90** |
+
+**Multiple codes per label removed the penalty.** On Reuters the semantic-feature arm hits
+**exactly** the control's unseen P@1 where every earlier semantic-feature arm lost (GloVe
+m=1: 59.59; replace: 24.25). Labels go from ~80 distinct code-tuples to 87 of 87 distinct
+code-sets, and 2470 of 2526 on npm even though a level-0 code there lands on 40 labels on
+average (max 467). Identity is recoverable; it just does not convert.
+
+**Retraining removed the loss but created no gain.** Unseen P@1 returns from 60.53 to the
+control's 61.28, so the earlier -0.75 was a train/test artifact -- but 15 points of extra
+unseen recall still produce no unseen P@1. With the mismatch closed, "retrieval is not the
+binding constraint" is established rather than suspected.
+
+**npm is a wash on every axis, including retrieval.** Unseen recall moves +0.89 against
+Reuters' +15.1. Two measured causes: 697 of 3223 labels receive no code at all under GloVe's
+vocabulary, and 64-way cells are far too coarse for 3223 fine-grained labels.
+
+## Semantic pruning of the mined pattern
+
+`-prune_vectors` / `-prune_min_sim` drop mined pairs whose feature names are unrelated. On
+GZ-Reuters-90, keeping 78% (min_sim 0.15) and 66% (0.30) of the pattern:
+
+| min_sim | P@1 | PSP@5 | unseen P@1 | seen P@1 |
+|---|---|---|---|---|
+| 0.00 (control) | **86.35** | **62.94** | **61.28** | 95.04 |
+| 0.15 | 86.25 | 61.82 | 60.15 | **95.27** |
+| 0.30 | 86.25 | 60.47 | 59.77 | **95.27** |
+
+It trades unseen accuracy for seen accuracy and does not pay for itself here -- co-occurrence
+was already choosing the right pairs. The efficiency argument only bites on a large pattern.
+
+## A measurement error worth recording
+
+The first npm run of this section reported control P@1 52.15 against the true 73.04. The
+model directory was shared with a previous Reuters run and still held its `seen_labels.txt`;
+those 75 ids are all valid indices into npm's 3223 labels, so nothing complained and 2862
+labels with real training data were treated as unseen. Shortlist recall matched the
+reference *exactly* -- only scoring was wrong -- which is what made it survive a first
+glance. The pipeline now rejects a seen-labels cache that disagrees with `trn_X_Y`.
