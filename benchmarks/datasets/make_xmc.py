@@ -37,13 +37,31 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from zestxml.dataset import build_dataset, one_line  # noqa: E402
 
 
-def _open(path):
-    return gzip.open(path, "rt", encoding="utf-8") if path.endswith(".gz") else open(path, encoding="utf-8")
+_fallbacks = {}
+
+
+def _lines(path):
+    """Yield decoded lines, tolerating files that are not valid UTF-8.
+
+    These bundles are scraped product and category text and are not consistently encoded --
+    AmazonCat-13K's label file contains latin-1 bytes. Decoding per line rather than per
+    file means one bad line cannot cost the whole read, and latin-1 decodes any byte, so
+    nothing is dropped and no character becomes a replacement glyph.
+    """
+    op = gzip.open if path.endswith(".gz") else open
+    with op(path, "rb") as f:
+        for raw in f:
+            try:
+                yield raw.decode("utf-8")
+            except UnicodeDecodeError:
+                _fallbacks[path] = _fallbacks.get(path, 0) + 1
+                yield raw.decode("latin-1")
 
 
 def read_json_split(path, use_content):
     texts, targets = [], []
-    with _open(path) as f:
+    if True:
+        f = _lines(path)
         for line in f:
             if not line.strip():
                 continue
@@ -56,8 +74,7 @@ def read_json_split(path, use_content):
 
 
 def read_lines(path):
-    with _open(path) as f:
-        return [one_line(l) for l in f]
+    return [one_line(l) for l in _lines(path)]
 
 
 def read_smat_rows(path):
@@ -123,8 +140,12 @@ def load(src, use_content):
 
 
 def main(src, out, unseen_frac=0.0, use_content=False, min_df=3, seed=0):
+    _fallbacks.clear()  # the counter is module level; a re-read would otherwise double it
     trn_texts, trn_ids, tst_texts, tst_ids, names = load(src, use_content)
     print(f"read {len(trn_texts)} train / {len(tst_texts)} test / {len(names)} labels")
+    for path, n in _fallbacks.items():
+        print(f"  note: {n} line(s) of {os.path.basename(path)} were not valid UTF-8 and "
+              f"were decoded as latin-1")
     assert len(trn_texts) == len(trn_ids), f"{len(trn_texts)} texts vs {len(trn_ids)} label rows"
     assert len(tst_texts) == len(tst_ids), f"{len(tst_texts)} texts vs {len(tst_ids)} label rows"
 
