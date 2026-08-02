@@ -184,6 +184,17 @@ def run_xhtp_fine_tune(params: Params) -> None:
     if os.path.exists(seen_file):
         log("using seen labels file : %s" % seen_file)
         seen = torch.as_tensor(read_seen_labels(seen_file)).to(device)
+        # This file is a cache, so it must agree with the data it was cached for. A stale
+        # one left by a run over a *different* dataset silently retrains on a fraction of
+        # the labels: Reuters' 75 ids are all valid indices into npm's 3223 labels, so a
+        # range check does not catch it, and the run completes with quietly wrong numbers.
+        derived = seen_labels_of(trn_X_Y)
+        if seen.numel() != derived.numel() or not torch.equal(seen.sort().values, derived.sort().values.to(seen.device)):
+            raise ValueError(
+                "%s lists %d seen labels but trn_X_Y implies %d. It is a cache from another "
+                "run -- delete it, or point -model_dir at a fresh directory."
+                % (seen_file, seen.numel(), derived.numel())
+            )
     else:
         log("generating seen labels from trn_X_Y")
         seen = seen_labels_of(trn_X_Y)

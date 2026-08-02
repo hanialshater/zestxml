@@ -61,6 +61,9 @@ def recalls(shortlist_path, truth, unseen_mask):
 
 def main(lexical_dir, semantic_dir, out="Results", **cfg):
     config = {**CONFIG, **cfg}
+    # namespace by dataset: these directories cache a seen-labels file and a model, and
+    # reusing them across datasets is how a whole npm run came back quietly wrong
+    out = "%s/Rt-%s" % (out.rstrip("/"), os.path.basename(lexical_dir.rstrip("/")))
     truth = read_text_smat(f"{lexical_dir}/tst_X_Y.txt")
     unseen = torch.zeros(truth.ncols, dtype=torch.bool)
     with open(f"{lexical_dir}/unseen_labels.txt") as f:
@@ -69,27 +72,27 @@ def main(lexical_dir, semantic_dir, out="Results", **cfg):
                 unseen[int(line.split()[0])] = True
 
     print("=== control: lexical features, lexical candidates")
-    lex = ZestXML(lexical_dir, f"{out}/Rt-lex", **config)
+    lex = ZestXML(lexical_dir, f"{out}/lex", **config)
     lex.fit(); lex.predict()
-    rows = [("lexical control", lex.evaluate(verbose=False), f"{out}/Rt-lex")]
+    rows = [("lexical control", lex.evaluate(verbose=False), f"{out}/lex")]
 
     print("\n=== semantic dataset, scored on its own terms (reference)")
-    sem = ZestXML(semantic_dir, f"{out}/Rt-sem", **config)
+    sem = ZestXML(semantic_dir, f"{out}/sem", **config)
     sem.fit(); sem.predict()
-    rows.append(("semantic features", sem.evaluate(verbose=False), f"{out}/Rt-sem"))
+    rows.append(("semantic features", sem.evaluate(verbose=False), f"{out}/sem"))
 
     # the candidate sets the semantic model generated, for train and for test
-    sem_trn, sem_tst = f"{out}/Rt-sem/model/shortlist.bin", f"{out}/Rt-sem/shortlist.bin"
-    lex_trn, lex_tst = f"{out}/Rt-lex/model/shortlist.bin", f"{out}/Rt-lex/shortlist.bin"
+    sem_trn, sem_tst = f"{out}/sem/model/shortlist.bin", f"{out}/sem/shortlist.bin"
+    lex_trn, lex_tst = f"{out}/lex/model/shortlist.bin", f"{out}/lex/shortlist.bin"
 
-    ensure_dir(f"{out}/Rt-union")
-    uni_trn, uni_tst = f"{out}/Rt-union/trn_shortlist.bin", f"{out}/Rt-union/tst_shortlist.bin"
+    ensure_dir(f"{out}/union")
+    uni_trn, uni_tst = f"{out}/union/trn_shortlist.bin", f"{out}/union/tst_shortlist.bin"
     write_bin_smat(union(read_bin_smat(sem_trn), read_bin_smat(lex_trn)), uni_trn)
     write_bin_smat(union(read_bin_smat(sem_tst), read_bin_smat(lex_tst)), uni_tst)
 
     for name, trn_sl, tst_sl, res in (
-        ("lexical + sem candidates", sem_trn, sem_tst, f"{out}/Rt-semcand"),
-        ("lexical + union candidates", uni_trn, uni_tst, f"{out}/Rt-unioncand"),
+        ("lexical + sem candidates", sem_trn, sem_tst, f"{out}/semcand"),
+        ("lexical + union candidates", uni_trn, uni_tst, f"{out}/unioncand"),
     ):
         print(f"\n=== {name} (features unchanged, candidates swapped in BOTH stages)")
         m = ZestXML(lexical_dir, res, **config,
