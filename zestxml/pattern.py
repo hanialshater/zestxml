@@ -26,7 +26,7 @@ from typing import Dict, List, Optional, Tuple
 import torch
 from torch import Tensor
 
-from .csr import CSR, bounded_chunks, prod_dense_rows, row_costs, spspmm, topk_per_row_dense
+from .csr import CSR, bounded_chunks, counts_to_indptr, prod_dense_rows, row_costs, spspmm, topk_per_row_dense
 
 GOOD_TH = 100.0  # prod_for_jaccard keeps entries above this on top of the top-k
 
@@ -272,3 +272,64 @@ def build_sparsity_pattern(
 def union_pattern(Xf_Yf: CSR, Yf_Xf: CSR) -> CSR:
     """``sparsity_pattern`` = ``Xf_Yf`` + ``Yf_Xf^T`` (the two supports are disjoint)."""
     return add_matrices(Xf_Yf, Yf_Xf.transpose())
+
+
+def prune_by_similarity(Xf_Yf: CSR, Xf: List[str], Yf: List[str], vectors: str,
+                        min_sim: float, log=print) -> CSR:
+    """Drop mined ``(xf, yf)`` pairs whose feature names are semantically unrelated.
+
+    Mining keeps the top ``bs_count`` label features per point feature by co-occurrence, so
+    a frequent-but-meaningless pair can win a slot that a meaningful one needed. This spends
+    the pattern's budget on plausible pairs instead: an entry survives only if the cosine
+    between the two feature names clears ``min_sim``.
+
+    Note the direction. Adding semantically-close pairs that co-occurrence did *not* find
+    was measured and lost 4.3 points of unseen precision on GZ-NPM -- semantics is a poor
+    source of new links. Removing pairs co-occurrence *did* find is the opposite operation
+    and is untested; the label's unique ``__label__`` feature and any pair whose names cannot
+    both be embedded are always kept, so pruning can only ever remove links it can judge.
+    """
+    import torch
+
+    from .embed import load_word_vectors
+
+    keep_always = torch.zeros(len(Yf), dtype=torch.bool)
+    for j, name in enumerate(Yf):
+        keep_always[j] = name.startswith("__label__")
+
+    # a label feature "1_<tok>" is compared through <tok>, the form the direct map uses
+    yf_tok = [n.split("_", 1)[1] if "_" in n and not n.startswith("__label__") else n for n in Yf]
+    # Most of Xf is bigrams, so judging only single words leaves 4 entries in 5 unjudgeable
+    # and the prune barely bites. A multi-word name is the mean of its token vectors, and
+    # only when every token is known -- the same rule the direct map uses.
+    needed = {tok for n in list(Xf) + list(yf_tok) for tok in n.split()}
+    index, table = load_word_vectors(vectors, torch.float32, vocab=needed)
+    table = torch.nn.functional.normalize(table, dim=1)
+
+    def embed(names):
+        out = torch.zeros(len(names), table.shape[1])
+        ok = torch.zeros(len(names), dtype=torch.bool)
+        for i, n in enumerate(names):
+            toks = n.split()
+            if toks and all(tok in index for tok in toks):
+                out[i] = table[torch.tensor([index[tok] for tok in toks])].mean(0)
+                ok[i] = True
+        return torch.nn.functional.normalize(out, dim=1), ok
+
+    xvec, xok = embed(Xf)
+    yvec, yok = embed(yf_tok)
+    rows = Xf_Yf.row_ids().cpu()
+    cols = Xf_Yf.indices.cpu()
+
+    judgeable = xok[rows] & yok[cols] & ~keep_always[cols]
+    sim = torch.zeros(Xf_Yf.nnz)
+    if judgeable.any():
+        sim[judgeable] = (xvec[rows[judgeable]] * yvec[cols[judgeable]]).sum(1)
+    keep = (~judgeable) | (sim >= min_sim)
+    log("pattern prune: %d/%d entries judgeable, keeping %d of %d (min_sim %.2f)"
+        % (int(judgeable.sum()), Xf_Yf.nnz, int(keep.sum()), Xf_Yf.nnz, min_sim))
+
+    keep = keep.to(Xf_Yf.device)
+    counts = torch.zeros(Xf_Yf.nrows, dtype=torch.long, device=Xf_Yf.device)
+    counts.index_add_(0, rows[keep], torch.ones(int(keep.sum()), dtype=torch.long, device=Xf_Yf.device))
+    return CSR(counts_to_indptr(counts), Xf_Yf.indices[keep], Xf_Yf.values[keep], Xf_Yf.shape)

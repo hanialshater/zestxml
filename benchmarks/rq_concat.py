@@ -82,6 +82,13 @@ def main(argv=None):
     ap.add_argument("--block_split", type=float, default=0.5,
                     help="blocknorm only: share of the row's mass given to the rq block")
     ap.add_argument("--doc_max_tokens", type=int, default=200)
+    ap.add_argument("--label_codes", type=int, default=1,
+                    help="assign the m nearest centroids per level to each LABEL instead of "
+                         "just the nearest. Keeps every code as frequent as before -- so it "
+                         "still fires, which is where --tuples failed -- while making the set "
+                         "of codes specific: on synthetic data 398/400 items get a unique "
+                         "code-set at m=3 against 288/400 at m=1.")
+    ap.add_argument("--doc_codes", type=int, default=1, help="same, for documents")
     ap.add_argument("--tuples", action="store_true",
                     help="emit coarse-to-fine PREFIX TUPLES (rq0_a, rq01_a-b, rq012_a-b-c, ...) "
                          "instead of L independent marginals. The identity of an item lives in "
@@ -123,19 +130,26 @@ def main(argv=None):
     print("embedded %d/%d train, %d/%d test, %d/%d labels"
           % (len(trn_keep), len(trn_txt), len(tst_keep), len(tst_txt), len(lab_keep), len(names)))
 
-    book, trn_codes = rq_kmeans(trn_emb, args.levels, args.codebook, seed=args.seed)  # TRAIN ONLY
-    tst_codes, lab_codes = book.transform(tst_emb), book.transform(lab_emb)
+    book, _ = rq_kmeans(trn_emb, args.levels, args.codebook, seed=args.seed)  # TRAIN ONLY
+    trn_codes = book.transform_multi(trn_emb, args.doc_codes)
+    tst_codes = book.transform_multi(tst_emb, args.doc_codes)
+    lab_codes = book.transform_multi(lab_emb, args.label_codes)
     print(f"codebook fit on {len(trn_emb)} training documents only")
-    for line in sharing_report(lab_codes):
+    for line in sharing_report(lab_codes[:, :, 0]):
         print("  labels: " + line)
 
     def feats_of(code):
-        """The feature names for one item's code vector."""
+        """Feature names for one item. ``code`` is (levels, m); column 0 is the nearest."""
         if not args.tuples:
-            return ["rq%d_%d" % (l, int(code[l])) for l in range(args.levels)]
+            return sorted({"rq%d_%d" % (l, int(c)) for l in range(args.levels) for c in code[l]})
         return ["rq%s_%s" % ("".join(str(j) for j in range(l + 1)),
-                             "-".join(str(int(code[j])) for j in range(l + 1)))
+                             "-".join(str(int(code[j][0])) for j in range(l + 1)))
                 for l in range(args.levels)]
+
+    if args.label_codes > 1 or args.doc_codes > 1:
+        sets = {tuple(feats_of(lab_codes[r])) for r in range(lab_codes.shape[0])}
+        print("  labels: %d distinct code-sets over %d coded labels (label m=%d, doc m=%d)"
+              % (len(sets), lab_codes.shape[0], args.label_codes, args.doc_codes))
 
     rq_names = sorted({n for codes in (trn_codes, tst_codes, lab_codes)
                        for r in range(codes.shape[0]) for n in feats_of(codes[r])})
@@ -147,7 +161,7 @@ def main(argv=None):
     # ---- rq feature weights ----------------------------------------------------------
     if args.mode == "idf":
         df = Counter()
-        for r in range(len(trn_codes)):
+        for r in range(trn_codes.shape[0]):
             for n in feats_of(trn_codes[r]):
                 df[n] += 1
         n_doc = max(1, len(trn_codes))

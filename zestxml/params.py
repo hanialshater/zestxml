@@ -29,9 +29,14 @@ DEFAULTS: Dict[str, str] = {
     "direct_topk": "3",  # fuzzy links kept per label feature
     "direct_min_sim": "0.5",  # cosine floor for a fuzzy link
     "direct_vectors": "-",  # word2vec/GloVe/fastText text file for -direct_map vectors
+    # ---- semantic pruning of the mined pattern -------------------------------
+    "prune_vectors": "-",  # vectors/model used to score how related a mined (xf, yf) pair is
+    "prune_min_sim": "0.0",  # drop pattern entries below this cosine; 0 disables pruning
     # ---- shortlist -----------------------------------------------------------
     "shortyK": "100",
-    "shortlist_file": "-",  # use this candidate set instead of generating one
+    "shortlist_file": "-",  # test-time candidate set, instead of generating one
+    "trn_shortlist_file": "-",  # training candidate set; the two have different shapes, so
+    # training on semantically-retrieved candidates needs both (see benchmarks/rq_shortlist.py)
     "F": "10",
     # ---- classifier ----------------------------------------------------------
     "bilinear_classifier_kind": "0",

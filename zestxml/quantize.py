@@ -129,6 +129,38 @@ class RQCodebook:
     def levels(self) -> int:
         return len(self.codebooks)
 
+    def transform_multi(self, X, m: int = 1) -> np.ndarray:
+        """Assign the ``m`` nearest centroids at each level -> codes ``(n, levels, m)``.
+
+        Hard assignment gives an item one cell per level, and a cell holding 4.6 labels
+        cannot rank the labels inside it. Assigning several keeps each individual code as
+        frequent as before -- so it still fires, which is where prefix tuples failed -- while
+        making the *set* of codes specific: two labels in the same cell at rank 1 usually
+        differ by rank 2 or 3. The residual is followed down the rank-1 centroid, so the
+        levels stay a proper coarse-to-fine decomposition.
+        """
+        from sklearn.metrics import pairwise_distances_argmin
+
+        R = np.asarray(X, dtype=np.float32).copy()
+        out = np.empty((R.shape[0], self.levels, m), dtype=np.int64)
+        if R.shape[0] == 0:
+            return out
+        for l, C in enumerate(self.codebooks):
+            k = min(m, C.shape[0])
+            d = ((R[:, None, :] - C[None, :, :]) ** 2).sum(-1) if C.shape[0] * R.shape[0] <= 4_000_000 \
+                else None
+            if d is None:  # fall back to chunks when the dense distance block is too big
+                order = np.empty((R.shape[0], k), dtype=np.int64)
+                for lo in range(0, R.shape[0], 4096):
+                    blk = ((R[lo:lo + 4096, None, :] - C[None, :, :]) ** 2).sum(-1)
+                    order[lo:lo + 4096] = np.argsort(blk, axis=1)[:, :k]
+            else:
+                order = np.argsort(d, axis=1)[:, :k]
+            out[:, l, :k] = order
+            out[:, l, k:] = order[:, :1]
+            R -= C[order[:, 0]]  # follow the residual down the nearest centroid
+        return out
+
     def transform(self, X) -> np.ndarray:
         """Quantize new items with the already-fitted centroids -> codes (n, levels)."""
         from sklearn.metrics import pairwise_distances_argmin

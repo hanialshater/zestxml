@@ -62,10 +62,18 @@ def _dtype(params: Params):
     return torch.float64 if params.bool("float64") else torch.float32
 
 
-def _shortlist(params: Params, X: CSR, Y_Yf: CSR, sparsity_pattern: CSR, device, dtype) -> CSR:
-    """The candidate set: generated as usual, or loaded from -shortlist_file."""
-    if params.given("shortlist_file"):
-        path = params.path("shortlist_file")
+def _shortlist(params: Params, X: CSR, Y_Yf: CSR, sparsity_pattern: CSR, device, dtype,
+               which: str = "shortlist_file") -> CSR:
+    """The candidate set: generated as usual, or loaded from a file.
+
+    Training and prediction take *different* files -- the matrices have different row
+    counts -- so retraining on a candidate set from somewhere else needs both
+    ``-trn_shortlist_file`` and ``-shortlist_file``. Supplying only the test one trains the
+    scorer on lexically-retrieved negatives and then asks it to rank semantically-retrieved
+    ones, which is a train/test mismatch rather than an experiment.
+    """
+    if params.given(which):
+        path = params.path(which)
         log("loading shortlist from %s" % path)
         sl = read_bin_smat(path, device, dtype)
         assert sl.shape == (X.nrows, Y_Yf.nrows), (
@@ -137,6 +145,10 @@ def run_xhtp_approx(params: Params) -> None:
             dense_elems=params.int("dense_elems"),
             log=log,
         )
+        if params.given("prune_vectors") and params.float("prune_min_sim") > 0:
+            from .pattern import prune_by_similarity
+            Xf_Yf = prune_by_similarity(Xf_Yf, Xf, Yf, params.path("prune_vectors"),
+                                        params.float("prune_min_sim"), log=log)
         sparsity_pattern = union_pattern(Xf_Yf, Yf_Xf)
 
         log("[STAT] nnz of sparsity pattern mat : %d" % sparsity_pattern.nnz)
@@ -182,7 +194,8 @@ def run_xhtp_fine_tune(params: Params) -> None:
         trn_X_Xf = trn_X_Xf.unit_normalize_rows()
 
         log("\ngetting %d shortlist per point..." % params.int("shortyK"))
-        shortlist = _shortlist(params, trn_X_Xf, Y_Yf, sparsity_pattern, device, dtype)
+        shortlist = _shortlist(params, trn_X_Xf, Y_Yf, sparsity_pattern, device, dtype,
+                               which="trn_shortlist_file")
         write_bin_smat(shortlist, model_dir + SEP + "shortlist.bin")
         log("[STAT] nnz of shortlist    : %d" % shortlist.nnz)
         log("[STAT] recall of shortlist : %.2f%%" % shortlist.recall(trn_X_Y))
