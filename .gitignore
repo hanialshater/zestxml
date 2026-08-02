@@ -1,6 +1,5 @@
-Results/
 GZXML-Datasets/
-.ipynb_checkpoints/
-__pycache__/
-ipynb/
+Results/
 run
+*.o
+__pycache__/

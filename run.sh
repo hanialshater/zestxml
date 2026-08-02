@@ -10,7 +10,7 @@ mkdir -p ${RES_DIR}
 mkdir -p ${MODEL_DIR}
 
 # set -x
-/usr/bin/time -f "\nReal time : %E\nMax RAM : %M KB\nPercent CPU : %P" \
+time \
 ./run 	-trn_X_Xf ${DATA_DIR}/trn_X_Xf.txt \
 		-tst_X_Xf ${DATA_DIR}/tst_X_Xf.txt \
 		-Y_Yf ${DATA_DIR}/Y_Yf.txt \
