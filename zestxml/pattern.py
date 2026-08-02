@@ -329,7 +329,10 @@ def prune_by_similarity(Xf_Yf: CSR, Xf: List[str], Yf: List[str], vectors: str,
     log("pattern prune: %d/%d entries judgeable, keeping %d of %d (min_sim %.2f)"
         % (int(judgeable.sum()), Xf_Yf.nnz, int(keep.sum()), Xf_Yf.nnz, min_sim))
 
+    # rows/cols above are CPU copies (the vector table is a CPU tensor), so the mask has to
+    # come back to the matrix's device before it indexes anything that lives there
     keep = keep.to(Xf_Yf.device)
+    rows_dev = Xf_Yf.row_ids()[keep]
     counts = torch.zeros(Xf_Yf.nrows, dtype=torch.long, device=Xf_Yf.device)
-    counts.index_add_(0, rows[keep], torch.ones(int(keep.sum()), dtype=torch.long, device=Xf_Yf.device))
+    counts.index_add_(0, rows_dev, torch.ones_like(rows_dev))
     return CSR(counts_to_indptr(counts), Xf_Yf.indices[keep], Xf_Yf.values[keep], Xf_Yf.shape)
