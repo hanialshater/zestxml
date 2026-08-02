@@ -84,10 +84,18 @@ def unseen_labels(data_dir: str, trn: CSR, n_labels: int) -> torch.Tensor:
     return freq == 0
 
 
+# Names the GZXML datasets have used for the pairs to zero before scoring. The reference
+# metrics.py picks pos_trn_val.txt or pos_trn_tst.txt depending on which split it scores,
+# so which one applies depends on `split`.
+FILTER_NAMES = {"tst": ["pos_trn_tst.txt", "filter_labels_test.txt", "tst_filter_labels.txt"],
+                "val": ["pos_trn_val.txt", "filter_labels_val.txt", "val_filter_labels.txt"]}
+
+
 def report(
     scores: Union[str, CSR, torch.Tensor],
     data_dir: str,
     verbose: bool = True,
+    split: str = "tst",
 ) -> Dict[str, Dict[str, float]]:
     """Evaluate a score matrix against a dataset directory.
 
@@ -95,7 +103,7 @@ def report(
     Returns ``{"all labels": {...}, "unseen only": {...}, "seen only": {...}}``; the last
     two are present only when the dataset has both kinds of label.
     """
-    truth = read_text_smat(f"{data_dir}/tst_X_Y.txt")
+    truth = read_text_smat(f"{data_dir}/{split}_X_Y.txt")
     trn = read_text_smat(f"{data_dir}/trn_X_Y.txt")
     if isinstance(scores, str):
         scores = read_bin_smat(scores)
@@ -104,13 +112,24 @@ def report(
         scores = scores.to_dense()
     dense_scores, dense_truth = scores.cpu().float(), (truth.to_dense() > 0).float()
 
-    filter_path = f"{data_dir}/pos_trn_tst.txt"
-    if os.path.exists(filter_path):
-        drop = read_text_smat(filter_path)
+    # A filter matrix removes (point, label) pairs before scoring -- typically train/test
+    # overlap. Not applying one inflates every metric, so say which was used, and say so
+    # just as loudly when none was found: a silent absence is how a number gets compared
+    # against a published one that was filtered.
+    # build_dataset writes empty *_filter_labels.txt placeholders, so existence is not
+    # enough -- an empty file is "no filter", not a filter with no pairs.
+    found = [n for n in FILTER_NAMES.get(split, [])
+             if os.path.exists(f"{data_dir}/{n}") and os.path.getsize(f"{data_dir}/{n}") > 0]
+    if found:
+        drop = read_text_smat(f"{data_dir}/{found[0]}")
         dense_scores = dense_scores.clone()
         dense_scores[drop.row_ids(), drop.indices] = 0.0
         if verbose:
-            print(f"applied filter matrix {filter_path} ({drop.nnz} pairs)")
+            print(f"applied filter matrix {found[0]} ({drop.nnz} pairs)"
+                  + (f"; also present but unused: {found[1:]}" if len(found) > 1 else ""))
+    elif verbose:
+        print(f"no filter matrix found for split '{split}' (looked for "
+              f"{', '.join(FILTER_NAMES.get(split, []))}) -- metrics are unfiltered")
 
     inv_prop = inv_propensity(trn)
     unseen = unseen_labels(data_dir, trn, truth.ncols)
