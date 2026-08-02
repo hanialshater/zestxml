@@ -90,6 +90,15 @@ def read_smat_rows(path):
 def load(src, use_content):
     """Return (trn_texts, trn_ids, tst_texts, tst_ids, label_names) for either layout."""
     j = os.path.join
+    # Check this before anything else: every branch below ends in a message that lists the
+    # directory, so a missing one turns the error path itself into a FileNotFoundError and
+    # buries the real problem. "None" arrives here when the notebook's download failed.
+    if not src or not os.path.isdir(src):
+        raise SystemExit(
+            f"source directory {src!r} does not exist. The download step did not produce "
+            f"one -- fetch the dataset by hand from "
+            f"http://manikvarma.org/downloads/XC/XMLRepository.html (take the RAW TEXT "
+            f"bundle, not the BoW features), unpack it, and pass its path.")
     if os.path.exists(j(src, "trn.json.gz")) or os.path.exists(j(src, "trn.json")):
         ext = ".json.gz" if os.path.exists(j(src, "trn.json.gz")) else ".json"
         trn_texts, trn_ids = read_json_split(j(src, "trn" + ext), use_content)
