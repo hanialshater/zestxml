@@ -470,6 +470,8 @@ only** (`rq_kmeans(trn_emb, ...)`; test documents and label names go through
 | concat blocknorm, 25% | 84.86 | 58.08 | 94.37 | 76.58 |
 | concat idf, 25% | 85.59 | 59.77 | 94.63 | 81.23 |
 | concat blocknorm, 50% | 84.50 | 46.99 | 94.22 | 86.38 |
+| prefix tuples, 10% mass | 86.19 | 60.53 | 94.63 | 73.42 |
+| prefix tuples, 30% mass | 84.66 | 59.77 | 94.19 | 73.75 |
 | lexical model, **rq shortlist only** | 86.45 | 59.96 | 95.08 | 81.06 |
 | lexical model, **union shortlist** | 86.39 | 60.53 | 95.04 | 83.39 |
 
@@ -504,15 +506,42 @@ only** (`rq_kmeans(trn_emb, ...)`; test documents and label names go through
   71.82 → 71.90, unseen P@1 52.11 → 51.46 (−0.65). Every delta is a wash. The geometry sweep
   was worse than a wash: its best Reuters cell took npm's overall recall from 71.82 to 22.88.
 
-## Why, mechanically
+## Why, mechanically — two wrong answers, then the one that survives
 
-An rq code at K=64 sits on 4.6 labels (max 30) on Reuters. Label expansion *gained* 8.1
-points at 1.25 labels per feature and *lost* 7.2 at 1.54 — every rq level is worse than the
-losing case. The sanity check shows it directly: `cotton` = `[41,60,2,48]` and `corn` =
-`[41,60,35,48]` differ at one level of four. Codes encode **theme**; ranking needs
-**identity**. Raising K does not fix it — at K=128 the 90 label names occupy only ~29–43
-distinct cells and land where few documents live, so the shared-cell link fires *less*
-often, and unseen recall falls to 71.26.
+**Wrong answer 1: "codes encode theme, not identity."** This was recorded here on the
+strength of one example — `cotton = [41,60,2,48]` and `corn = [41,60,35,48]` sharing 3 of 4
+levels. It does not survive re-fitting; sklearn's KMeans is not bit-reproducible in this
+environment, and in a re-run the two share only level 0. `benchmarks/rq_probe.py` says close
+to the opposite: the 87 coded Reuters labels occupy 18 distinct cells at level 0 but **80–85
+distinct full 4-tuples**, and the few collisions are ones a semantic space *ought* to make —
+gold/silver, gas/nat gas, cocoa/coffee, crude/veg oil. Coarse cells are coherent: one holds
+the agricultural commodities, one the oils and metals, one the macro indicators. The
+quantizer was never the problem.
+
+**Wrong answer 2: "the identity is in the conjunction, so emit prefix tuples."** That
+follows from the probe, and it is wrong too — measured, not argued. `--tuples` takes Reuters
+from 256 rq features to 20544 and gives, at 10% / 30% mass: P@1 86.19 / 84.66, unseen P@1
+60.53 / 59.77, unseen recall 73.42 / 73.75. Worse than the marginals it was meant to fix,
+and more mass makes it worse. The recall column says why: a near-unique tuple identifies a
+label beautifully *when it matches exactly* and almost never matches exactly, so it fires
+far less often than a marginal (+2.5 recall against +10.1). Marginals are too coarse to
+rank; tuples are too sparse to fire. Neither converts.
+
+**What survives.** The direct map already links `1_corn` to `corn` by exact string equality,
+and **99.09% of npm's and 100% of Reuters' unseen-label tokens are already present in `Xf`**
+(measured in the diagnostic phase of the hybrid workflow). So for essentially every unseen
+label, an exact lexical link already fires. Semantic codes can only add a *fuzzier* version
+of a link that is already there in its sharpest form — and the earlier direct-map result
+found the same thing independently: fuzzy matching helped only where vector coverage was
+poor and hurt where it was good. There is no gap here for semantics to fill. That also
+explains the one result that looked like a contradiction: handing the unchanged lexical
+model 12.5 points more unseen recall moved unseen P@1 *down*, because the labels it newly
+retrieves are ones the exact channel had already considered and correctly declined.
+
+This is the explanation consistent with every arm measured, but it is an explanation, not a
+measurement. The test that would settle it: restrict to labels whose tokens are *absent*
+from `Xf` and see whether rq codes help there. On these two datasets that subpopulation is
+almost empty, which is precisely the point.
 
 ## Unaddressed
 
