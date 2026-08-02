@@ -15,6 +15,8 @@ Layouts seen in the wild, both handled:
   ``title`` (and often ``content``) field, and ``target_ind`` giving the label ids.
 * ``trn_X_Y.txt`` / ``tst_X_Y.txt`` plus ``train_raw_texts.txt`` /
   ``test_raw_texts.txt`` / ``label_raw_texts.txt`` -- one text per line.
+* PECOS ``xmc-base``: ``X.trn.txt`` / ``X.tst.txt`` raw text, ``Y.trn.npz`` / ``Y.tst.npz``
+  scipy label matrices, and ``output-items.txt`` for the label text.
 
 ``--unseen_frac`` holds out that fraction of labels from the *training* matrix to create a
 generalized zero-shot split, the same construction the GZXML datasets use. Pass 0 to keep
@@ -78,6 +80,17 @@ def load(src, use_content):
         lbl_texts, _ = read_json_split(j(src, "lbl" + ext), use_content)
         return trn_texts, trn_ids, tst_texts, tst_ids, lbl_texts
 
+    if os.path.exists(j(src, "output-items.txt")) and os.path.exists(j(src, "Y.trn.npz")):
+        import scipy.sparse as sp
+
+        def rows_of(path):
+            m = sp.load_npz(path).tocsr()
+            return [m.indices[m.indptr[i]:m.indptr[i + 1]].tolist() for i in range(m.shape[0])]
+
+        return (read_lines(j(src, "X.trn.txt")), rows_of(j(src, "Y.trn.npz")),
+                read_lines(j(src, "X.tst.txt")), rows_of(j(src, "Y.tst.npz")),
+                read_lines(j(src, "output-items.txt")))
+
     need = ["trn_X_Y.txt", "tst_X_Y.txt", "train_raw_texts.txt", "test_raw_texts.txt",
             "label_raw_texts.txt"]
     missing = [n for n in need if not os.path.exists(j(src, n))]
@@ -85,6 +98,7 @@ def load(src, use_content):
         raise SystemExit(
             f"{src}: recognised neither layout.\n"
             f"  json layout needs trn/tst/lbl.json[.gz]\n"
+            f"  pecos layout needs X.trn.txt, X.tst.txt, Y.trn.npz, Y.tst.npz, output-items.txt\n"
             f"  text layout needs {', '.join(need)} (missing {', '.join(missing)})\n"
             f"  present: {', '.join(sorted(os.listdir(src))[:20])}")
     return (read_lines(j(src, "train_raw_texts.txt")), read_smat_rows(j(src, "trn_X_Y.txt")),
