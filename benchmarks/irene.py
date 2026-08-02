@@ -29,6 +29,12 @@ Three arms are measured, which is the point of the file:
               the generator matters.
 ``irene``     the same neighbours through a learned single-layer attention generator,
               trained on *seen* labels leave-one-out so it never sees an unseen label.
+``fallback``  keep the classifiers where they exist and score unseen labels with the plain
+              encoder. No synthesis at all, and the baseline any of this has to beat --
+              on GZ-NPM it reached unseen P@1 42.19 against the generator's 29.84.
+``dual + ``   the encoder and the classifier combined, which is how IRENE is deployed: it
+              augments a dense retriever rather than replacing it. Scoring with the
+              synthesized classifier alone measures the generator, not the system.
 
 Classifiers live in the encoder's embedding space rather than in sparse feature space --
 that is what makes synthesis cheap, and it is what the paper does.
@@ -194,19 +200,49 @@ def main(data_dir, model=None, vectors=None, k=16, epochs=15, gen_epochs=40, dev
     # --- score and report ---------------------------------------------------------------
     truth = (tst_Y.to_dense() > 0).float()
     inv_prop = inv_propensity(trn_Y)
-    arms = [("dual encoder (cosine)", Xte @ L.t()),
-            ("one-vs-all", Xte @ W.t()),
-            ("+ mean synthesis", Xte @ W_mean.t()),
-            ("+ IRENE generator", Xte @ W_irene.t())]
+    def z(s):
+        """Per-point standardisation, so the two channels can be added at all."""
+        return (s - s.mean(1, keepdim=True)) / s.std(1, keepdim=True).clamp(min=1e-6)
 
-    print("\n%-24s %7s %7s %9s %9s" % ("arm", "P@1", "PSP@5", "unseen P@1", "seen P@1"))
-    for name, scores in arms:
+    dual = Xte @ L.t()
+    # IRENE augments a dense retriever: the deployed score combines the encoder with the
+    # classifier rather than replacing it. Scoring with the synthesized classifier alone
+    # measures the generator in isolation, which is informative but is not the system.
+    combo = lambda Wx: z(dual) + z(Xte @ Wx.t())
+    # and the baseline any of this has to beat: keep the classifiers where they exist and
+    # fall back to the encoder where they do not. No synthesis at all.
+    fallback = Xte @ W.t()
+    fallback = z(fallback)
+    fallback[:, unseen] = z(dual)[:, unseen]
+
+    arms = [("dual encoder (cosine)", dual),
+            ("one-vs-all", Xte @ W.t()),
+            ("ova, dual on unseen", fallback),
+            ("+ mean synthesis", Xte @ W_mean.t()),
+            ("+ IRENE generator", Xte @ W_irene.t()),
+            ("dual + mean synthesis", combo(W_mean)),
+            ("dual + IRENE generator", combo(W_irene))]
+
+    def row(name, scores):
         s = scores.detach().cpu().float()
         a = evaluate(s, truth, inv_prop)
         un = evaluate(s, truth, inv_prop, label_mask=unseen)
         se = evaluate(s, truth, inv_prop, label_mask=~unseen)
         print("%-24s %7.2f %7.2f %9.2f %9.2f" % (
             name, a["P@1"], a["PSP@5"], un["P@1"], se["P@1"]))
+
+    print("\n%-24s %7s %7s %9s %9s" % ("arm", "P@1", "PSP@5", "unseen P@1", "seen P@1"))
+    for name, scores in arms:
+        row(name, scores)
+
+    # An equal-weight sum of two channels is the fusion that already collapsed once in this
+    # repo, so show the shape rather than assume 1:1. These are read off the test set and
+    # are a diagnostic ceiling, not a result -- if the best alpha is far from 0.5 the
+    # equal-weight rows above are simply mistuned.
+    print("\ndiagnostic: mixing weight swept ON TEST (upper bound, not a result)")
+    for alpha in (0.25, 0.5, 0.75):
+        row("  %.2f*dual + irene" % alpha,
+            alpha * z(dual) + (1 - alpha) * z(Xte @ W_irene.t()))
 
 
 if __name__ == "__main__":
