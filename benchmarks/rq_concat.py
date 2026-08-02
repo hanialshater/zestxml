@@ -9,20 +9,25 @@ makes the two blocks compete inside a single unit budget: adding L rq entries ne
 shrinks every lexical entry, and the ``--weight`` knob only re-tunes the split. Whatever
 weight you pick, a document's lexical representation changes just because codes were added.
 
-Two ways out, both implemented here:
+So this script always normalises the two blocks *independently* and then gives each an
+explicit share of the row. The lexical part is then identical to the control however many
+codes are added, and the row arrives unit-norm so the pipeline's own normalisation is a
+no-op. Two knobs, deliberately separate:
 
-``--mode blocknorm``
-    Normalise the lexical block to unit norm and the rq block to unit norm *independently*,
-    then scale each by ``1/sqrt(2)`` and concatenate. The row is already unit norm, so the
-    pipeline's own normalisation is a no-op, and the lexical part is bit-identical to the
-    control no matter how many codes are added. ``--block_split`` moves the split away from
-    50/50 if you want the blocks to carry unequal mass.
+``--block_split``
+    The *mass* of the rq block, as a share of row energy. This turns out to be the variable
+    that decides everything -- weighting and concatenation are not really alternatives, they
+    are two ways of setting this, one implicit and one exact.
 
-``--mode idf``
-    Concatenate raw, but weight each rq code by its inverse document frequency over the
-    training documents. This targets the measured cause of the failure directly: a level-0
-    code sitting on 30 labels is crushed automatically, while a rare deep-level code keeps
-    its mass. The weighting is learned from the data rather than chosen.
+``--mode``
+    The *shape* of the rq block. ``blocknorm`` gives every code equal weight; ``idf`` weights
+    each code by its inverse document frequency over the training documents, so a code
+    sitting on many items counts for less -- learned from the data rather than chosen.
+
+Keeping mass and shape apart is not fussiness. Raw idf weights average ~4.9 against
+tf-idf's ~0.10, so concatenating them unscaled hands the rq block 98.9% of the row and
+silently turns an "augment" arm into a "replace" arm. That mistake cost a whole measured
+arm here before it was caught.
 
 Only Xf.txt, Yf.txt, trn_X_Xf.txt, tst_X_Xf.txt and Y_Yf.txt are rewritten; trn_X_Y.txt,
 tst_X_Y.txt, unseen_labels.txt and the raw text files are hard-linked from the source, so
@@ -130,12 +135,15 @@ def main(argv=None):
     def combine(lexical, codes, prefix_id):
         rq = [(prefix_id["rq%d_%d" % (l, int(codes[l]))],
                weight["rq%d_%d" % (l, int(codes[l]))]) for l in range(len(codes))] if codes is not None else []
-        if args.mode == "blocknorm":
-            # each block normalised on its own, so the lexical part is unchanged by the
-            # presence or number of rq codes -- this is the point of the exercise
-            return ([(i, v * lex_scale) for i, v in unit(lexical)]
-                    + [(i, v * rq_scale) for i, v in unit(rq)])
-        return lexical + rq  # idf: concatenate raw, the pipeline normalises
+        # Both blocks are normalised on their own and then given an explicit share of the
+        # row, so the lexical part is unchanged by the presence or number of rq codes and
+        # --block_split means exactly what it says. The mode chooses the *shape* of the rq
+        # block (flat, or idf so a widely-shared code counts for less); --block_split
+        # chooses its *mass*. Keeping those apart matters: raw idf weights average ~4.9
+        # against tf-idf's ~0.10, so concatenating them unscaled hands the rq block 98.9%
+        # of the row and silently turns any "augment" arm into a "replace" arm.
+        return ([(i, v * lex_scale) for i, v in unit(lexical)]
+                + [(i, v * rq_scale) for i, v in unit(rq)])
 
     def build(base, codes, keep, n, prefix_id):
         code_of = {int(i): codes[r] for r, i in enumerate(keep)}
