@@ -438,3 +438,85 @@ Why it failed, and what to fix if it is retried:
 Not in rescoring. 46% of npm's unseen test positives never reach the candidate set, so the
 ceiling for any fusion or expansion that reranks a fixed shortlist is 54% unseen recall.
 Candidate generation for unseen labels is the binding constraint.
+
+---
+
+# RQ-KMeans semantic tokens (workflow `zestxml-rq-kmeans-tokens`)
+
+Residual-quantization k-means over GloVe embeddings, emitted as features: a document gets
+`rq0_<c> ... rq{L-1}_<c>`, a label gets `1_rq0_<c> ...`. The direct map already strips up to
+the first underscore and matches on string equality, so the two link with no model change —
+a label and a document share a feature when they land in the same quantization cell rather
+than only when they share a literal word. The RQ-KMeans variant of the RQ-VAE semantic-ID
+idea (TIGER / OneRec), with plain k-means at each level instead of a learned codebook.
+
+Five agents, two adversarial verifiers, plus four arms I ran myself. Both verifiers
+reproduced every reported number and confirmed the codebook is fit on **training documents
+only** (`rq_kmeans(trn_emb, ...)`; test documents and label names go through
+`transform()`, which only does `pairwise_distances_argmin` against stored centroids).
+
+## GZ-Reuters-90 — every arm measured, control P@1 86.35 / unseen 61.28 / seen 95.04
+
+| arm | P@1 | unseen P@1 | seen P@1 | unseen shortlist recall |
+|---|---|---|---|---|
+| control (lexical) | **86.35** | 61.28 | 95.04 | 70.93 |
+| replace, L=4 K=64 | 72.11 | 24.25 | 81.18 | 80.23 |
+| replace, L=4 K=32 (best swept cell) | 71.91 | 12.22 | 80.88 | 78.90 |
+| augment w=1.0 | 83.41 | 44.17 | 93.51 | 88.54 |
+| augment w=0.5 | 84.27 | 51.32 | 94.48 | 94.02 |
+| **augment w=0.3** | 84.83 | **62.97** | 94.56 | **94.68** |
+| **augment w=0.3, label side only** | **86.55** | 62.22 | 95.04 | 93.36 |
+| concat blocknorm, 10% mass | 86.25 | 60.90 | 94.86 | 81.06 |
+| concat blocknorm, 25% | 84.86 | 58.08 | 94.37 | 76.58 |
+| concat idf, 25% | 85.59 | 59.77 | 94.63 | 81.23 |
+| concat blocknorm, 50% | 84.50 | 46.99 | 94.22 | 86.38 |
+| lexical model, **rq shortlist only** | 86.45 | 59.96 | 95.08 | 81.06 |
+| lexical model, **union shortlist** | 86.39 | 60.53 | 95.04 | 83.39 |
+
+## What holds
+
+* **Replace is dead.** Reproduced independently twice: unseen P@1 61.28 → 24.25 at L=4 K=64,
+  → 12.22 at the best cell of a six-cell geometry sweep. In replace mode the row normalises
+  to L equal entries, so there is no weight left to tune. Do not pursue it.
+* **Weight is the whole variable.** Unseen P@1 across the augment weights: 44.17 (w=1.0),
+  51.32 (0.5), 62.97 (0.3). The first conclusion drawn here — "retrieval yes, scoring no" —
+  was an artifact of an untuned weight, not a property of the method.
+* **The gain is label-feature sharing, not retrieval.** Two independent results pin this
+  down. Putting codes on the *label side only* preserves the control's P@1 and seen P@1
+  exactly while keeping the unseen gain, so re-representing documents contributes nothing.
+  And feeding the lexical model **more candidates alone buys nothing**: +12.5 points of
+  unseen shortlist recall (70.93 → 83.39, union arm) moved unseen P@1 *down* 0.75. The extra
+  candidates arrive as distractors — the scorer has no way to pick them out. Channel 2 (a
+  shared feature carrying trained weight) is doing the work, not channel 1.
+* **At matched mass, idf beats flat weighting** — 85.59/59.77/81.23 against 84.86/58.08/76.58
+  at 25%. Downweighting a widely-shared code helps once it is not allowed to hijack the row.
+
+## What does not hold
+
+* **The Reuters precision gain is marginal, and smaller than it first looked.** A verifier
+  re-ran three seeds: overall P@1 for the label-only arm is +0.077 mean against a control
+  seed spread of 0.066 — **noise**. Unseen P@1 is +0.94 / +1.32 / +0.75, sign-stable but
+  ~1 point, inside the control's own 0.38 unseen-P@1 spread as a single reading, and `w=0.3`
+  was chosen on test. Suggestive, not established.
+* **The robust gain is PSP@5, not P@1**: +1.74 / +2.11 / +2.00 across seeds, ~30× the
+  control's PSP@5 spread. Tail labels, which is where propensity scoring looks.
+* **Nothing transfers to GZ-NPM.** Unseen shortlist recall 54.01 → 54.99 (+1.0), overall
+  71.82 → 71.90, unseen P@1 52.11 → 51.46 (−0.65). Every delta is a wash. The geometry sweep
+  was worse than a wash: its best Reuters cell took npm's overall recall from 71.82 to 22.88.
+
+## Why, mechanically
+
+An rq code at K=64 sits on 4.6 labels (max 30) on Reuters. Label expansion *gained* 8.1
+points at 1.25 labels per feature and *lost* 7.2 at 1.54 — every rq level is worse than the
+losing case. The sanity check shows it directly: `cotton` = `[41,60,2,48]` and `corn` =
+`[41,60,35,48]` differ at one level of four. Codes encode **theme**; ranking needs
+**identity**. Raising K does not fix it — at K=128 the 90 label names occupy only ~29–43
+distinct cells and land where few documents live, so the shared-cell link fires *less*
+often, and unseen recall falls to 71.26.
+
+## Unaddressed
+
+The npm null is diluted by 697 labels that received no code at all, and was never split
+coded-vs-uncoded — the one measurement that could still rescue the npm result. The weight
+sweep is three test-read points. sklearn's KMeans is not bit-reproducible here, so the
+w=1.0 arm used a slightly different codebook from the others.
