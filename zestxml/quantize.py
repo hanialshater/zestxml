@@ -210,3 +210,73 @@ def sharing_report(codes: np.ndarray, levels: Optional[int] = None) -> List[str]
             "(max %d)" % (l, nz.size, c.size, float(nz.mean()), int(nz.max()))
         )
     return out
+
+
+# --------------------------------------------------------------------------- #
+# transformer encoders
+# --------------------------------------------------------------------------- #
+def encode_texts(
+    texts: Sequence[str],
+    model: str = "sentence-transformers/all-MiniLM-L6-v2",
+    batch_size: int = 256,
+    device: Optional[str] = None,
+    log=print,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Embed with a sentence-transformers model, same return shape as :func:`embed_texts`.
+
+    The alternative to a mean of word vectors, and it removes the asymmetry that mean has:
+    :func:`embed_texts` must average a 200-token document over its known tokens while
+    embedding a short label name only when *every* token is known, so the two sides land in
+    different regions of the space and label names then get quantized against
+    *document*-cluster centroids. One encoder for both sides makes that go away, and
+    nothing is dropped for being out of vocabulary.
+
+    ``clip-ViT-B-32`` is the model to pass when the corpus has images: its text and image
+    towers share one space, so an image and a label *name* can be quantized with the same
+    codebook. Mind its 77-token limit -- long documents are truncated hard, and a text-only
+    corpus is better served by ``all-MiniLM-L6-v2``.
+    """
+    from sentence_transformers import SentenceTransformer
+
+    enc = SentenceTransformer(model, device=device)
+    log("encoding %d texts with %s" % (len(texts), model))
+    emb = enc.encode(list(texts), batch_size=batch_size, convert_to_numpy=True,
+                     normalize_embeddings=True, show_progress_bar=False)
+    return np.asarray(emb, dtype=np.float32), np.arange(len(texts), dtype=np.int64)
+
+
+def encode_images(
+    paths: Sequence[str],
+    model: str = "clip-ViT-B-32",
+    batch_size: int = 64,
+    device: Optional[str] = None,
+    log=print,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Embed images with a CLIP model, skipping any that fail to open.
+
+    Returns ``(emb, keep)`` like the text encoders, so an image corpus drops into the same
+    ``rq_kmeans`` -> features path. Fit the codebook on these, then quantize the *label
+    names* through :func:`encode_texts` with the **same CLIP model** so both sides share one
+    space -- otherwise the codes are a seen-label-only feature and no unseen label can ever
+    carry one.
+    """
+    from PIL import Image
+    from sentence_transformers import SentenceTransformer
+
+    enc = SentenceTransformer(model, device=device)
+    rows, keep = [], []
+    for lo in range(0, len(paths), batch_size):
+        chunk, idx = [], []
+        for i in range(lo, min(lo + batch_size, len(paths))):
+            try:
+                chunk.append(Image.open(paths[i]).convert("RGB"))
+                idx.append(i)
+            except Exception:
+                continue
+        if chunk:
+            rows.append(enc.encode(chunk, convert_to_numpy=True, normalize_embeddings=True))
+            keep.extend(idx)
+    if not rows:
+        return np.zeros((0, 512), dtype=np.float32), np.zeros(0, dtype=np.int64)
+    log("encoded %d/%d images with %s" % (len(keep), len(paths), model))
+    return np.concatenate(rows).astype(np.float32), np.asarray(keep, dtype=np.int64)

@@ -70,7 +70,11 @@ def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("src")
     ap.add_argument("dst")
-    ap.add_argument("--vectors", required=True)
+    ap.add_argument("--vectors", help="word2vec/GloVe text file (mean-of-token embedding)")
+    ap.add_argument("--model", help="sentence-transformers model instead of --vectors, e.g. "
+                                    "all-MiniLM-L6-v2, or clip-ViT-B-32 for a space shared "
+                                    "with images. One encoder for both sides, so label names "
+                                    "and documents land in the same region.")
     ap.add_argument("--mode", choices=["blocknorm", "idf"], default="blocknorm")
     ap.add_argument("--levels", "-L", type=int, default=4)
     ap.add_argument("-K", "--codebook", type=int, default=64)
@@ -100,13 +104,24 @@ def main(argv=None):
     def clip(t):
         return " ".join(t.split()[: args.doc_max_tokens])
 
-    import torch
-    index, table = load_word_vectors(args.vectors, torch.float32)
-    # documents average over their known tokens; a name is embedded only when every token
-    # is known, the rule that stops "middleware webpack" collapsing onto "middleware"
-    trn_emb, trn_keep = embed_texts([clip(t) for t in trn_txt], index, table, require_all=False)
-    tst_emb, tst_keep = embed_texts([clip(t) for t in tst_txt], index, table, require_all=False)
-    lab_emb, lab_keep = embed_texts(names, index, table, require_all=True)
+    if bool(args.model) == bool(args.vectors):
+        ap.error("pass exactly one of --vectors (GloVe) or --model (sentence-transformers)")
+    if args.model:
+        from zestxml.quantize import encode_texts
+        trn_emb, trn_keep = encode_texts([clip(t) for t in trn_txt], args.model)
+        tst_emb, tst_keep = encode_texts([clip(t) for t in tst_txt], args.model)
+        lab_emb, lab_keep = encode_texts(names, args.model)
+    else:
+        import torch
+        index, table = load_word_vectors(args.vectors, torch.float32)
+        # documents average over their known tokens; a name is embedded only when every
+        # token is known, the rule that stops "middleware webpack" collapsing onto
+        # "middleware". The two rules differ, which is the asymmetry --model removes.
+        trn_emb, trn_keep = embed_texts([clip(t) for t in trn_txt], index, table, require_all=False)
+        tst_emb, tst_keep = embed_texts([clip(t) for t in tst_txt], index, table, require_all=False)
+        lab_emb, lab_keep = embed_texts(names, index, table, require_all=True)
+    print("embedded %d/%d train, %d/%d test, %d/%d labels"
+          % (len(trn_keep), len(trn_txt), len(tst_keep), len(tst_txt), len(lab_keep), len(names)))
 
     book, trn_codes = rq_kmeans(trn_emb, args.levels, args.codebook, seed=args.seed)  # TRAIN ONLY
     tst_codes, lab_codes = book.transform(tst_emb), book.transform(lab_emb)
