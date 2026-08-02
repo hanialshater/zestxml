@@ -747,3 +747,45 @@ Caveats on this implementation: the encoder is frozen, one-vs-all trains for 15 
 embedding space rather than end-to-end, and the generator is a single attention layer
 trained for 60 steps. It tests the *idea*, not the paper's system, and the absolute
 comparison against ZestXML should be read with that in mind.
+
+
+# AmazonCat-13K: the first standard-benchmark run
+
+Everything above is measured on GZ-NPM and GZ-Reuters-90, two datasets built here. No
+published paper reports either, so no number above can be checked against anyone else's.
+This section exists to close that: AmazonCat-13K is a repository dataset that XMC papers
+do report, converted with `benchmarks/datasets/make_xmc.py --unseen_frac 0` (every label
+seen, which is the setting published P@k is measured in).
+
+1.19M train / 306K test / 13,330 labels.
+
+| run | pattern nnz | trn recall | tst recall | P@1 | P@3 | P@5 | nDCG@5 | PSP@1 | PSP@5 |
+|---|---|---|---|---|---|---|---|---|---|
+| title only | 11,192,094 | 87.55 | 82.05 | 76.53 | — | — | — | — | — |
+| title + `--content` | 270,402,032 | 98.00 | 92.46 | **93.41** | 79.60 | 64.29 | 86.01 | 54.02 | 72.15 |
+
+Training on the `--content` run: 2749 s over 118.6M (point, candidate) pairs, 98.17%
+accuracy, 83.20% on positives. Pattern mining 173 s.
+
+**The title-only run was mis-specified, not weak.** AmazonCat-13K's published numbers are
+measured on the product description, not the title — the title-only variants of these
+datasets are separate datasets with `-Titles-` in the name. Feeding the description grows
+the mined pattern 24x and lifts test shortlist recall 82.05 -> 92.46, and P@1 by +16.9.
+Most of what looked like a modelling deficit was a candidate-generation ceiling created by
+throwing away the text the benchmark is defined on.
+
+**The comparison band is still unverified.** The notebook prints `XML-CNN ~75 ..
+AttentionXML ~95 .. XR-Transformer ~96` for this dataset, and those figures came from a
+web-search summary, not from a paper I read — every source that would settle it
+(manikvarma.org, the ACM DL, arXiv HTML) is blocked from this sandbox. 93.41 lands where a
+sparse linear model plausibly should against transformer methods, above the CNN era and a
+point or two below the strongest, but "plausible" is not "checked". Treat this row as an
+internal measurement until someone puts a real table next to it.
+
+**What it does establish, independent of the band:** the port trains and predicts at
+1.19M x 13K without changes, and its accuracy on a dataset it was not tuned on is in the
+same regime as published work rather than an order off. That was the open question behind
+"I don't buy numbers", and it is now answered for scale and sanity, not for ranking.
+
+Not yet run on this dataset: the `--unseen_frac 0.1` zero-shot split, which is the setting
+every other experiment in this file is about.
