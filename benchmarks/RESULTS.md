@@ -693,3 +693,57 @@ transfer: transformer embedding spaces are anisotropic, so 0.7 is selective for 
 permissive for MiniLM, admitting more and looser neighbours. That is a *threshold* result
 rather than an encoder result, and the sweep that would separate them was lost to a
 directory-naming collision (both floors wrote to the same tag) -- fixed, not yet re-run.
+
+
+---
+
+# EMMETT / IRENE: synthesizing the missing classifier
+
+[Yadav et al., KDD '24](https://dl.acm.org/doi/10.1145/3637528.3672046), from the ZestXML
+authors, re-implemented compactly in `benchmarks/irene.py`. It inverts every other
+experiment here: instead of describing an unseen label better, it builds the classifier the
+label does not have out of the classifiers of labels it resembles, through one attention
+layer trained on seen labels leave-one-out.
+
+GZ-NPM, all-MiniLM-L6-v2 embeddings, k=16 neighbours, measured on a GPU box:
+
+| arm | P@1 | PSP@5 | unseen P@1 | seen P@1 |
+|---|---|---|---|---|
+| dual encoder (cosine) | 42.79 | 28.77 | 42.19 | 39.56 |
+| one-vs-all | 56.35 | 17.10 | **2.49** (floor) | 57.86 |
+| ova, dual encoder on unseen | 52.54 | 37.18 | **42.19** | 57.86 |
+| + mean synthesis | 56.35 | 17.10 | 25.60 | 57.86 |
+| + IRENE generator | 56.59 | 23.70 | 27.96 | 57.86 |
+| dual + mean synthesis | 63.18 | 24.63 | 41.39 | **64.40** |
+| **dual + IRENE generator** | **64.17** | **37.72** | 41.25 | 63.83 |
+| *ZestXML, for reference* | *73.04* | *28.64* | *52.11* | *74.97* |
+
+**The mechanism works.** One-vs-all sits at the evaluator's tie-break floor on unseen labels
+because it has no classifier for them at all; synthesis takes that to 25.60 by averaging
+neighbours and 27.96 through the generator. On GZ-Reuters-90 the generator *lost* to the
+average, with only 75 seen labels to train on; npm's 2937 is enough.
+
+**The encoder term is not optional.** Scored alone the synthesized classifier looks like a
+failure -- 27.96 against the plain encoder's 42.19. Combined, as the method is deployed, the
+same classifiers give P@1 64.17, eight points above one-vs-all and twenty-one above the
+encoder. The first reading here was a scoring error, not a result.
+
+**The learned generator earns its keep, on the tail.** dual+IRENE against dual+mean is
+PSP@5 37.72 against 24.63, +13.1 -- the largest gain from any learned component measured in
+this repo. On P@1 the two are within a point.
+
+**But synthesis does not beat the trivial baseline on unseen labels.** Keeping the
+classifiers where they exist and falling back to the encoder where they do not -- no
+synthesis, no tuning -- reaches 42.19, above dual+IRENE's 41.25. All of the unseen accuracy
+here comes from the encoder. What the synthesized classifiers buy is head and tail accuracy,
+not zero-shot accuracy.
+
+**And ZestXML still wins at this scale**, by 8.9 P@1 and 10.9 unseen P@1 -- while *losing*
+PSP@5 by 9.1. Consistent with the Renee result: encoder-based extreme classification is
+being evaluated two orders of magnitude below the label counts these methods are designed
+for (npm has 3223; the paper uses 270K-1.3M).
+
+Caveats on this implementation: the encoder is frozen, one-vs-all trains for 15 epochs in
+embedding space rather than end-to-end, and the generator is a single attention layer
+trained for 60 steps. It tests the *idea*, not the paper's system, and the absolute
+comparison against ZestXML should be read with that in mind.
