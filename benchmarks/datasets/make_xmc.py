@@ -77,8 +77,24 @@ def load(src, use_content):
         ext = ".json.gz" if os.path.exists(j(src, "trn.json.gz")) else ".json"
         trn_texts, trn_ids = read_json_split(j(src, "trn" + ext), use_content)
         tst_texts, tst_ids = read_json_split(j(src, "tst" + ext), use_content)
-        lbl_texts, _ = read_json_split(j(src, "lbl" + ext), use_content)
-        return trn_texts, trn_ids, tst_texts, tst_ids, lbl_texts
+        # Label text is the whole zero-shot mechanism, and not every bundle ships it under
+        # the same name -- some (AmazonCat-13K raw) ship only trn/tst and keep the category
+        # names in a separate file. Without any of these the labels are bare ids and there
+        # is nothing for a label feature to match, so refuse rather than train on nothing.
+        if os.path.exists(j(src, "lbl" + ext)):
+            lbl_texts, _ = read_json_split(j(src, "lbl" + ext), use_content)
+            return trn_texts, trn_ids, tst_texts, tst_ids, lbl_texts
+        for alt in ("output-items.txt", "Yf.txt", "label_map.txt", "label_raw_texts.txt",
+                    "labels.txt", "Y.txt"):
+            if os.path.exists(j(src, alt)):
+                print(f"label text from {alt} (no lbl{ext} in this bundle)")
+                return trn_texts, trn_ids, tst_texts, tst_ids, read_lines(j(src, alt))
+        raise SystemExit(
+            f"{src}: found trn/tst{ext} but no label text. ZestXML scores a label through "
+            f"the words of its name, so a bundle without one cannot be used here.\n"
+            f"  looked for: lbl{ext}, output-items.txt, Yf.txt, label_map.txt, "
+            f"label_raw_texts.txt, labels.txt, Y.txt\n"
+            f"  present: {', '.join(sorted(os.listdir(src))[:20])}")
 
     if os.path.exists(j(src, "output-items.txt")) and os.path.exists(j(src, "Y.trn.npz")):
         import scipy.sparse as sp
