@@ -78,6 +78,12 @@ def main(argv=None):
     ap.add_argument("--block_split", type=float, default=0.5,
                     help="blocknorm only: share of the row's mass given to the rq block")
     ap.add_argument("--doc_max_tokens", type=int, default=200)
+    ap.add_argument("--tuples", action="store_true",
+                    help="emit coarse-to-fine PREFIX TUPLES (rq0_a, rq01_a-b, rq012_a-b-c, ...) "
+                         "instead of L independent marginals. The identity of an item lives in "
+                         "the conjunction of its codes -- on GZ-Reuters-90 the 87 coded labels "
+                         "occupy 18 distinct level-0 cells but 80 distinct full tuples -- so "
+                         "emitting only marginals throws away what residual quantization built.")
     args = ap.parse_args(argv)
 
     src, dst = args.src, args.dst
@@ -108,9 +114,16 @@ def main(argv=None):
     for line in sharing_report(lab_codes):
         print("  labels: " + line)
 
-    used = sorted({(l, int(c)) for codes in (trn_codes, tst_codes, lab_codes)
-                   for l in range(args.levels) for c in codes[:, l]})
-    rq_names = ["rq%d_%d" % (l, c) for l, c in used]
+    def feats_of(code):
+        """The feature names for one item's code vector."""
+        if not args.tuples:
+            return ["rq%d_%d" % (l, int(code[l])) for l in range(args.levels)]
+        return ["rq%s_%s" % ("".join(str(j) for j in range(l + 1)),
+                             "-".join(str(int(code[j])) for j in range(l + 1)))
+                for l in range(args.levels)]
+
+    rq_names = sorted({n for codes in (trn_codes, tst_codes, lab_codes)
+                       for r in range(codes.shape[0]) for n in feats_of(codes[r])})
     new_Xf = list(Xf) + rq_names
     new_Yf = list(Yf) + ["1_" + n for n in rq_names]
     xf_id = {n: len(Xf) + i for i, n in enumerate(rq_names)}
@@ -120,8 +133,8 @@ def main(argv=None):
     if args.mode == "idf":
         df = Counter()
         for r in range(len(trn_codes)):
-            for l in range(args.levels):
-                df["rq%d_%d" % (l, int(trn_codes[r, l]))] += 1
+            for n in feats_of(trn_codes[r]):
+                df[n] += 1
         n_doc = max(1, len(trn_codes))
         weight = {n: math.log((1.0 + n_doc) / (1.0 + df.get(n, 0))) + 1.0 for n in rq_names}
         top = sorted(weight.items(), key=lambda kv: kv[1])[:4]
@@ -133,8 +146,7 @@ def main(argv=None):
     lex_scale, rq_scale = math.sqrt(1 - rq_share), math.sqrt(rq_share)
 
     def combine(lexical, codes, prefix_id):
-        rq = [(prefix_id["rq%d_%d" % (l, int(codes[l]))],
-               weight["rq%d_%d" % (l, int(codes[l]))]) for l in range(len(codes))] if codes is not None else []
+        rq = [(prefix_id[n], weight[n]) for n in feats_of(codes)] if codes is not None else []
         # Both blocks are normalised on their own and then given an explicit share of the
         # row, so the lexical part is unchanged by the presence or number of rq codes and
         # --block_split means exactly what it says. The mode chooses the *shape* of the rq
