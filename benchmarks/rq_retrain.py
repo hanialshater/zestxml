@@ -34,12 +34,21 @@ CONFIG = dict(bs_alpha=0.02, bs_direct_wt=0.8, bilinear_classifier_cost=5,
 
 
 def union(a: CSR, b: CSR) -> CSR:
-    """Candidate sets from two channels, merged per point."""
-    m = (a.to_dense() != 0) | (b.to_dense() != 0)
-    idx = m.nonzero()
-    counts = torch.bincount(idx[:, 0], minlength=m.shape[0])
-    indptr = torch.cat([torch.zeros(1, dtype=torch.long), counts.cumsum(0)])
-    return CSR(indptr, idx[:, 1].contiguous(), torch.ones(idx.shape[0]), m.shape)
+    """Candidate sets from two channels, merged per point.
+
+    Done on the sparse keys rather than by densifying: on GZ-NPM a dense candidate matrix
+    is 25127 x 3223 per operand, which is a few hundred megabytes for a result that has
+    well under a million non-zeros.
+    """
+    assert a.shape == b.shape, f"{a.shape} != {b.shape}"
+    ncols = a.shape[1]
+    keys = torch.cat([a.row_ids() * ncols + a.indices, b.row_ids() * ncols + b.indices])
+    keys = torch.unique(keys)
+    rows, cols = keys // ncols, keys % ncols
+    counts = torch.zeros(a.nrows, dtype=torch.long, device=rows.device)
+    counts.index_add_(0, rows, torch.ones_like(rows))
+    indptr = torch.cat([torch.zeros(1, dtype=torch.long, device=rows.device), counts.cumsum(0)])
+    return CSR(indptr, cols.contiguous(), torch.ones(cols.numel()), a.shape)
 
 
 def recalls(shortlist_path, truth, unseen_mask):
