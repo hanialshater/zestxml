@@ -99,6 +99,102 @@ def load_ml1m(root: str, min_len: int = 5) -> Tuple[Dict[int, List[int]], Dict[i
     return seqs, titles
 
 
+# --------------------------------------------------------------------------- #
+# Amazon Reviews 2023
+# --------------------------------------------------------------------------- #
+# The official host for the 2023 release. **These URLs are not reachable from the sandbox
+# this file was written in**, so the download path is untested here while the parsing below
+# is tested against a file in the documented format. If the fetch fails, the error says so
+# and tells you to download by hand rather than pretending the dataset is unavailable.
+AMAZON_BASE = "https://mcauleylab.ucsd.edu/public_datasets/data/amazon_2023"
+AMAZON_RATINGS = AMAZON_BASE + "/benchmark/5core/rating_only/{cat}.csv.gz"
+AMAZON_META = AMAZON_BASE + "/raw/meta_categories/meta_{cat}.jsonl.gz"
+
+
+def fetch_amazon(root: str, category: str = "Video_Games") -> str:
+    import urllib.error
+    import urllib.request
+
+    os.makedirs(root, exist_ok=True)
+    for url, name in ((AMAZON_RATINGS.format(cat=category), f"{category}.csv.gz"),
+                      (AMAZON_META.format(cat=category), f"meta_{category}.jsonl.gz")):
+        path = os.path.join(root, name)
+        if os.path.exists(path) and os.path.getsize(path) > 0:
+            continue
+        print(f"downloading {name} ...")
+        try:
+            urllib.request.urlretrieve(url, path)
+        except (urllib.error.URLError, urllib.error.HTTPError, OSError) as exc:
+            if os.path.exists(path):
+                os.remove(path)
+            raise SystemExit(
+                f"could not fetch {url}\n  {exc}\n"
+                f"Download it by hand from https://amazon-reviews-2023.github.io/ "
+                f"(5-core rating-only CSV, and the raw category metadata for titles), put "
+                f"both in {root}, and re-run. The file names must be {category}.csv.gz and "
+                f"meta_{category}.jsonl.gz.")
+    return root
+
+
+def load_amazon(root: str, category: str = "Video_Games", min_len: int = 5,
+                max_users: Optional[int] = None) -> Tuple[Dict, Dict]:
+    """Amazon Reviews 2023, in the same shape :func:`load_ml1m` returns.
+
+    Everything downstream -- the split, the cold construction, both models, the metric --
+    is dataset-agnostic and reads only ``({user: [item, ...]}, {item: text})``, so a second
+    dataset is a second loader and nothing else.
+
+    Reviews are keyed by ``parent_asin`` rather than ``asin`` so that colour and size
+    variants of one product are one item; scoring them separately would inflate every
+    metric by letting a model "miss" the target and still name the same product.
+    """
+    import csv
+    import gzip
+    import json
+
+    titles: Dict[str, str] = {}
+    meta = os.path.join(root, f"meta_{category}.jsonl.gz")
+    with gzip.open(meta, "rt", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            key = row.get("parent_asin")
+            title = (row.get("title") or "").strip()
+            if key and title:
+                cats = row.get("categories") or []
+                titles[key] = " ".join([title] + [str(c) for c in cats[:3]])
+
+    events: Dict[str, List[Tuple[int, str]]] = defaultdict(list)
+    ratings = os.path.join(root, f"{category}.csv.gz")
+    with gzip.open(ratings, "rt", encoding="utf-8", errors="replace") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            item = row.get("parent_asin") or row.get("asin")
+            user, ts = row.get("user_id"), row.get("timestamp")
+            if item in titles and user and ts:
+                events[user].append((int(float(ts)), item))
+
+    seqs = {}
+    for u, rows in sorted(events.items()):
+        rows.sort()
+        items = [i for _, i in rows]
+        if len(items) >= min_len:
+            seqs[u] = items
+        if max_users and len(seqs) >= max_users:
+            break
+    if not seqs:
+        raise SystemExit(
+            f"{root}: no user reached {min_len} interactions with a titled item -- "
+            f"{len(titles)} titles and {len(events)} users were read, so the two files "
+            f"probably do not describe the same category.")
+    return seqs, titles
+
+
+LOADERS = {"ml-1m": load_ml1m, "amazon": load_amazon}
+
+
 @dataclass
 class Split:
     """One leave-one-out split with a held-out cold item set."""
@@ -464,11 +560,19 @@ def zx_scores(split: Split, data_dir: str, res_dir: str, **cfg) -> torch.Tensor:
 # --------------------------------------------------------------------------- #
 # runner
 # --------------------------------------------------------------------------- #
-def main(data="raw/ml-1m", out="Results/SeqRec", cold_frac=0.1, epochs=200, ctx=20,
+def main(data=None, out="Results/SeqRec", cold_frac=0.1, epochs=200, ctx=20,
          windows=8, maxlen=200, seed=0, arms=("zestxml", "sasrec", "sasrec+content"),
-         **cfg):
-    fetch_ml1m(data)
-    seqs, titles = load_ml1m(data)
+         dataset="ml-1m", category="Video_Games", max_users=None, **cfg):
+    if dataset == "ml-1m":
+        data = data or "raw/ml-1m"
+        seqs, titles = load_ml1m(fetch_ml1m(data))
+    elif dataset == "amazon":
+        data = data or f"raw/amazon-{category}"
+        seqs, titles = load_amazon(fetch_amazon(data, category), category,
+                                   max_users=max_users)
+    else:
+        raise SystemExit(f"unknown dataset {dataset!r}; known: {sorted(LOADERS)}")
+    tag = dataset if dataset == "ml-1m" else f"{dataset}-{category}"
     split = make_split(seqs, titles, cold_frac=cold_frac, seed=seed)
     groups = frequency_groups(split)
     users = sorted(split.test_target)
@@ -481,7 +585,7 @@ def main(data="raw/ml-1m", out="Results/SeqRec", cold_frac=0.1, epochs=200, ctx=
     rows: Dict[str, Dict] = {}
     if "zestxml" in arms:
         print("\n=== ZestXML")
-        ds = f"GZXML-Datasets/SeqRec-ml1m-c{cold_frac}"
+        ds = f"GZXML-Datasets/SeqRec-{tag}-c{cold_frac}"
         build_zx_dataset(split, ds, windows_per_user=windows, ctx=ctx, seed=seed)
         s = zx_scores(split, ds, f"{out}/zestxml", **cfg)
         rows["zestxml"] = evaluate(s, targets, history, groups)
@@ -503,7 +607,10 @@ def main(data="raw/ml-1m", out="Results/SeqRec", cold_frac=0.1, epochs=200, ctx=
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--data", default="raw/ml-1m")
+    ap.add_argument("--data", default=None, help="directory; defaults per dataset")
+    ap.add_argument("--dataset", default="ml-1m", choices=["ml-1m", "amazon"])
+    ap.add_argument("--category", default="Video_Games", help="amazon category")
+    ap.add_argument("--max_users", type=int, default=None)
     ap.add_argument("--out", default="Results/SeqRec")
     ap.add_argument("--cold_frac", type=float, default=0.1)
     ap.add_argument("--epochs", type=int, default=200)
@@ -514,4 +621,5 @@ if __name__ == "__main__":
     ap.add_argument("--arms", default="zestxml,sasrec,sasrec+content")
     a = ap.parse_args()
     main(a.data, a.out, a.cold_frac, a.epochs, a.ctx, a.windows, a.maxlen, a.seed,
-         tuple(a.arms.split(",")))
+         tuple(a.arms.split(",")), dataset=a.dataset, category=a.category,
+         max_users=a.max_users)
