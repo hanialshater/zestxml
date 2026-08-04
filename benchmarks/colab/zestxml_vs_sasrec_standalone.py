@@ -2,7 +2,7 @@
 
     !pip -q install scikit-learn
     # paste this file, then:
-    rows = main(dataset="ml-1m", cold_frac=0.1, sasrec_epochs=200)
+    rows = main(dataset="ml-1m", cold_frac=0.1, horizon=5, sasrec_epochs=200)
 
 No repository, no imports beyond numpy / scipy / sklearn / torch. Every piece is here to
 be edited: the pattern miner, the bilinear scorer, the SASRec block, the split, the metric.
@@ -43,10 +43,21 @@ the history mask, and the metric function. ``sasrec+content`` gets the *same* tf
 ZestXML gets, through a learned linear map, so the cold column is a baseline and not a
 strawman.
 
-Published SASRec ml-1m numbers (HR@10 ~ 0.82) rank against 100 sampled negatives. Krichene
-& Rendle (KDD'20) showed that is not a consistent estimator of the full-catalogue metric.
-Everything here ranks the full catalogue, so it is much lower and NOT comparable. Do not
-put the two in one table.
+THE TASK IS XMC, NOT NEXT-ITEM
+------------------------------
+A point is a user and its labels are the SET of items they touch in the next ``horizon``
+steps. Metrics are the extreme-classification suite -- P@k, nDCG@k, and propensity-scored
+PSP@k -- with the same definitions as ``zestxml/eval.py``, so they line up with the rest of
+that repository. Read PSP@k, not just P@k: it is the column that rewards retrieving *rare*
+labels, and a popularity-follower scores well on P@k while doing nothing useful.
+
+Consequence for SASRec: it still *trains* on next-item, because that is what the
+architecture is for and crippling it would not make the comparison fairer. Only the
+evaluation is shared.
+
+Published SASRec ml-1m numbers (HR@10 ~ 0.82) are leave-one-out against 100 sampled
+negatives and have nothing to do with anything here -- different task, different candidate
+set. Do not put the two in one table.
 """
 
 from __future__ import annotations
@@ -171,53 +182,66 @@ LOADERS = {"ml-1m": load_ml1m, "amazon": load_amazon}
 
 
 # =========================================================================== #
-# 2. split
+# 2. split  --  XMC framing: one point per user, a SET of future items as labels
 # =========================================================================== #
 class Split:
-    """Leave-one-out, plus a set of items removed from training entirely.
+    """Time-ordered split with a future *window* as the target, plus a cold item set.
+
+    This is an extreme-multi-label problem, not leave-one-out next-item. A point is a user;
+    its labels are every item they interact with in the next ``horizon`` steps. That is what
+    the metrics below assume, and it is the framing the comparison is actually about --
+    "which items does this customer want", not "which single item is literally next".
+
+    Layout per user, in time order::
+
+        [ ....... train history ....... | val window | test window ]
+                                          horizon      horizon
 
     The cold construction is the point of the exercise, so it is worth being exact: an item
-    is chosen cold, then *every* occurrence of it is deleted from every training history and
-    from the validation targets. It survives only where it is somebody's final test target.
-    That leaves it with exactly zero training interactions -- not few, zero.
+    is chosen cold, then *every* occurrence of it is deleted from the training history and
+    the validation window. It survives only inside test windows. That leaves it with
+    exactly zero training interactions -- not few, zero.
     """
 
-    def __init__(self, seqs, titles, cold_frac=0.1, seed=0):
+    def __init__(self, seqs, titles, cold_frac=0.1, horizon=5, seed=0):
         rng = random.Random(seed)
-        self.titles = titles
+        self.titles, self.horizon = titles, horizon
         self.items = sorted({i for s in seqs.values() for i in s})
         self.index = {it: k for k, it in enumerate(self.items)}
+        H = horizon
 
         self.cold = set()
         if cold_frac > 0:
-            # only items that are somebody's last interaction can be held out and still be
+            # only items that land in somebody's test window can be held out and still be
             # measured; a cold item nobody is tested on is noise, not signal
-            pool = sorted({s[-1] for s in seqs.values() if len(s) >= 3})
+            pool = sorted({i for s in seqs.values() if len(s) >= 2 * H + 2 for i in s[-H:]})
             rng.shuffle(pool)
             self.cold = set(pool[:int(round(cold_frac * len(self.items)))])
 
         self.train, self.val, self.test, self.hist = {}, {}, {}, {}
         for u, s in seqs.items():
-            if len(s) < 3:
+            if len(s) < 2 * H + 2:
                 continue
-            h = [i for i in s[:-2] if i not in self.cold]
-            if len(h) < 2:
+            head, vwin, twin = s[:-2 * H], s[-2 * H:-H], s[-H:]
+            head = [i for i in head if i not in self.cold]
+            vwin = [i for i in vwin if i not in self.cold]
+            if len(head) < 2 or not twin:
                 continue
-            self.train[u] = h
-            if s[-2] not in self.cold:
-                self.val[u] = s[-2]
-            self.test[u] = s[-1]
-            self.hist[u] = h + ([s[-2]] if s[-2] not in self.cold else [])
+            self.train[u] = head
+            self.val[u] = vwin
+            self.test[u] = sorted(set(twin))
+            self.hist[u] = head + vwin          # everything visible at test time
 
         self.count = np.zeros(len(self.items), dtype=np.int64)
-        for h in self.train.values():
+        for h in list(self.train.values()) + list(self.val.values()):
             for i in h:
                 self.count[self.index[i]] += 1
-        for v in self.val.values():
-            self.count[self.index[v]] += 1
 
         self.users = sorted(self.test)
-        self.targets = np.array([self.index[self.test[u]] for u in self.users])
+        rows = [r for r, u in enumerate(self.users) for _ in self.test[u]]
+        cols = [self.index[i] for u in self.users for i in self.test[u]]
+        self.truth = sp.csr_matrix((np.ones(len(rows), np.float32), (rows, cols)),
+                                   shape=(len(self.users), self.n_items))
         self.test_hist = [[self.index[i] for i in self.hist[u]] for u in self.users]
 
     @property
@@ -225,6 +249,8 @@ class Split:
         return len(self.items)
 
     def groups(self, head_frac=0.2):
+        """Label masks. Metrics are reported per group by masking *labels*, the way the
+        reference splits seen from unseen -- not by bucketing points."""
         warm = np.nonzero(self.count > 0)[0]
         order = warm[np.argsort(-self.count[warm])]
         head = np.zeros(self.n_items, dtype=bool)
@@ -233,47 +259,80 @@ class Split:
 
 
 # =========================================================================== #
-# 3. one metric function, used by every arm
+# 3. XMC evaluation  --  P@k, nDCG@k, propensity-scored PSP@k
+#    Same definitions as zestxml/eval.py, so the numbers line up with the rest
+#    of that repository rather than being a private convention.
 # =========================================================================== #
-def evaluate(scores, split, groups, ks=(10, 50)):
-    """``scores`` dense (n_test_users, n_items).  Items already in the user's history are
-    masked: ZestXML has no notion of a sequence and would otherwise re-recommend what the
-    user just watched, which is not a prediction."""
+KS = (1, 3, 5)
+COLUMNS = ["P@1", "P@3", "P@5", "nDCG@5", "PSP@1", "PSP@3", "PSP@5"]
+
+
+def inv_propensity(count, n_points, A=0.55, B=1.5):
+    """Jain et al.'s propensity model. PSP@k rewards retrieving *rare* labels, which is
+    where a text-scored model earns its keep and a popularity-follower does not -- so it
+    is the column to read if P@k looks like a rout."""
+    C = (np.log(max(n_points, 2)) - 1) * (B + 1) ** A
+    return 1.0 + C * np.exp(-A * np.log(count + B))
+
+
+def _metrics(scores, truth, inv_prop, ks=KS):
+    ks = [k for k in ks if k <= scores.shape[1]]
+    keep = truth.sum(1) > 0          # points with nothing to retrieve carry no information
+    scores, truth = scores[keep], truth[keep]
+    if scores.shape[0] == 0:
+        return None
+    out = {"points": int(keep.sum())}
+    top = torch.topk(scores, max(ks), dim=1).indices
+    hits = torch.gather(truth, 1, top)
+    ip = torch.as_tensor(inv_prop, dtype=torch.float32)
+    gain = torch.gather(ip[None, :].expand_as(truth), 1, top) * hits
+
+    for k in ks:
+        out[f"P@{k}"] = 100.0 * hits[:, :k].sum(1).div(k).mean().item()
+        disc = 1.0 / torch.log2(torch.arange(k, dtype=torch.float) + 2)
+        dcg = (hits[:, :k] * disc[None, :]).sum(1)
+        n_true = truth.sum(1).clamp(max=k).long()
+        ideal = torch.cat([torch.zeros(1), disc.cumsum(0)])[n_true]
+        out[f"nDCG@{k}"] = 100.0 * (dcg / ideal).mean().item()
+        # PSP@k: achieved propensity-weighted gain over the best achievable one
+        best = torch.sort(truth * ip[None, :], dim=1, descending=True).values[:, :k]
+        out[f"PSP@{k}"] = 100.0 * gain[:, :k].sum().item() / max(best.sum().item(), 1e-9)
+    return out
+
+
+def evaluate(scores, split, groups):
+    """``scores`` dense (n_users, n_items). One row per label group.
+
+    Items already in the user's history are masked out: ZestXML has no notion of a
+    sequence and would otherwise re-recommend what the user just consumed, which is not a
+    prediction. A group row masks every label outside the group to -inf on the score side
+    and to zero on the truth side, exactly as the reference does for seen/unseen.
+    """
     scores = torch.as_tensor(scores).clone().float().cpu()
     for r, h in enumerate(split.test_hist):
         if h:
             scores[r, torch.as_tensor(h)] = -np.inf
+    truth = torch.as_tensor(np.asarray(split.truth.todense()), dtype=torch.float32)
+    inv_prop = inv_propensity(split.count.astype(np.float64), len(split.train))
 
-    top = torch.topk(scores, max(ks), dim=1).indices.numpy()
-    tgt = split.targets
-    hit = top == tgt[:, None]
-    rank = np.where(hit.any(1), hit.argmax(1), max(ks) + 1)
-
-    out = {}
-    for name, mask in [("all", np.ones(len(tgt), bool))] + [(g, m[tgt]) for g, m in groups.items()]:
-        if mask.sum() == 0:
-            continue
-        r = rank[mask]
-        row = {"n": int(mask.sum())}
-        for k in ks:
-            row[f"Recall@{k}"] = 100.0 * float((r < k).mean())
-        row["NDCG@10"] = 100.0 * float(
-            np.where(r < 10, 1.0 / np.log2(r.astype(float) + 2), 0.0).mean())
-        row["MRR"] = 100.0 * float(np.where(r <= max(ks), 1.0 / (r + 1.0), 0.0).mean())
-        out[name] = row
-    out["all"]["coverage@10"] = 100.0 * len(np.unique(top[:, :10])) / scores.shape[1]
-    return out
+    rows = {"all": _metrics(scores, truth, inv_prop)}
+    for name, mask in groups.items():
+        m = torch.as_tensor(mask)
+        s = scores.clone()
+        s[:, ~m] = -np.inf
+        r = _metrics(s, truth * m[None, :].float(), inv_prop)
+        if r is not None:
+            rows[name] = r
+    return rows
 
 
 def print_table(rows):
-    cols = ["Recall@10", "Recall@50", "NDCG@10", "MRR"]
-    print("%-18s %-6s %6s " % ("model", "group", "n") + " ".join("%9s" % c for c in cols))
+    print("%-18s %-6s %7s " % ("model", "group", "points")
+          + " ".join("%7s" % c for c in COLUMNS))
     for model, groups in rows.items():
         for g, m in groups.items():
-            print("%-18s %-6s %6d " % (model, g, m["n"])
-                  + " ".join("%9.2f" % m[c] for c in cols))
-    print("\ncoverage@10: " + ", ".join(f"{k} {v['all']['coverage@10']:.1f}%"
-                                        for k, v in rows.items()))
+            print("%-18s %-6s %7d " % (model, g, m["points"])
+                  + " ".join("%7.2f" % m[c] for c in COLUMNS))
 
 
 # =========================================================================== #
@@ -356,13 +415,22 @@ def _topk_rows(M, freq_r, freq_c, af_r, af_c, alpha, k):
 
 
 def mine_pattern(X, Y, XY, Xf, Yf, bs_count=20, bs_alpha=0.02, direct_wt=0.8):
-    """Which (point feature, label feature) pairs W is allowed to be non-zero on."""
+    """Which ``(point feature, label feature)`` pairs W may be non-zero on.
+
+    Mined in both directions and then de-duplicated, exactly as the reference does:
+    ``Xf_Yf`` keeps the top ``bs_count`` label features per point feature, ``Yf_Xf`` the
+    top ``bs_count`` point features per label feature, and an entry present in both is
+    kept once. Mining only one direction leaves rare features on the losing side with no
+    entries at all, which is the reason the reference does both.
+    """
     Xb, Yb, XYb = (m.copy() for m in (X, Y, XY))
     for m in (Xb, Yb, XYb):
         m.data[:] = 1.0
     X_Yf = (XYb @ Yb).tocsr()          # label features seen per point
     Y_Xf = (XYb.T @ Xb).tocsr()        # point features seen per label
 
+    # two kinds of frequency: over training (point, label) pairs, and plain document
+    # frequency. The scoring formula uses one in each denominator term.
     Yf_freq = np.asarray(X_Yf.sum(0)).ravel()
     Xf_freq = np.asarray(Y_Xf.sum(0)).ravel()
     Xf_df = np.asarray(Xb.sum(0)).ravel()
@@ -371,123 +439,161 @@ def mine_pattern(X, Y, XY, Xf, Yf, bs_count=20, bs_alpha=0.02, direct_wt=0.8):
     Xf_Yf = _topk_rows(Xb.T @ X_Yf, Xf_freq, Yf_freq, Xf_df, Yf_df, bs_alpha, bs_count)
     Yf_Xf = _topk_rows(Yb.T @ Y_Xf, Yf_freq, Xf_freq, Yf_df, Xf_df, bs_alpha, bs_count)
 
-    direct = direct_map(Xf, Yf, direct_wt)
-    pattern = (Xf_Yf + Yf_Xf.T + direct).tocoo()
-    pattern.sum_duplicates()
-    return pattern, direct
+    Xf_Yf = (Xf_Yf + direct_map(Xf, Yf, direct_wt)).tocsr()
+    # drop (yf, xf) entries whose transpose is already in Xf_Yf, so the two supports are
+    # disjoint and every (xf, yf) gets exactly one weight
+    T = Yf_Xf.T.tocsr()
+    dup = T.multiply(Xf_Yf != 0)
+    Yf_Xf_T = (T - dup).tocsr()
+    Yf_Xf_T.eliminate_zeros()
+
+    pattern = (Xf_Yf + Yf_Xf_T).tocoo()          # the support W lives on
+    return pattern, direct_map(Xf, Yf, direct_wt).tocsr()
+
+
+def shortlist(X, Y, pattern, K, batch=512):
+    """Top-``K`` labels per point under ``X @ pattern @ Y^T`` -- the candidate set.
+
+    This doubles as the untrained score the whole model starts from: it is the quantity
+    the reference's ``get_shortlist`` computes, and a label outside a point's shortlist is
+    never scored and therefore never retrieved. Shortlist recall is consequently a hard
+    ceiling on every metric, which is why it is printed.
+    """
+    Pt = _to_torch(pattern.tocsr().T.tocsr())    # (n_yf, n_xf)
+    Yt = _to_torch(Y)
+    rows, cols = [], []
+    for lo in range(0, X.shape[0], batch):
+        Xb = _dense(X[lo:lo + batch])
+        sc = torch.sparse.mm(Yt, torch.sparse.mm(Pt, Xb.t())).t()   # (b, n_labels)
+        k = min(K, sc.shape[1])
+        val, idx = torch.topk(sc, k, dim=1)
+        keep = val > 0                            # zero means no shared label feature
+        r = torch.arange(sc.shape[0], device=sc.device)[:, None].expand_as(idx)
+        rows.append((r[keep] + lo).cpu().numpy())
+        cols.append(idx[keep].cpu().numpy())
+    rows, cols = np.concatenate(rows), np.concatenate(cols)
+    return sp.csr_matrix((np.ones(len(rows), np.float32), (rows, cols)),
+                         shape=(X.shape[0], Y.shape[0]))
 
 
 class ZestXML:
-    """W over the mined pattern, trained with a squared hinge against sampled negatives.
+    """W over the mined pattern, trained on shortlist pairs with a squared hinge.
 
-    At these catalogue sizes every label is scored for every point, so there is no
-    shortlist: the "candidate generation" stage of the full system is replaced by ranking
-    everything, which strictly removes a source of error rather than adding one.  If you
-    push this past ~50k items, that is the first thing to put back.
+    Faithful to the reference in the three places that decide the numbers:
+
+    * **only shortlist pairs contribute to the loss.** Training against every item instead
+      changes the negative distribution completely -- and on this task it also samples
+      *cold* items as negatives, teaching the model to push down exactly what the cold
+      column then asks it to rank up.
+    * **the objective** is ``0.5||w||^2 + sum_i C_i * max(0, 1 - y_i * margin_i)^2`` with
+      ``C_i = cost`` (times ``pos_wt`` for positives), minimised with Adam and a linearly
+      decayed step, over mini-batches of points.
+    * **prediction is restricted to the shortlist.** A label outside it scores zero.
+
+    The margins are computed densely per batch and then masked to the shortlist, which is
+    exactly equivalent at these catalogue sizes and much shorter than the chunked kernel
+    the reference needs above ~100k labels.
     """
 
     def __init__(self, pattern, direct, n_xf, n_yf, alpha=0.9):
-        self.idx = torch.as_tensor(np.stack([pattern.row, pattern.col]), device=DEVICE)
+        idx = np.stack([pattern.row, pattern.col])
+        self.idx = torch.as_tensor(idx, device=DEVICE)
         self.shape = (n_xf, n_yf)
         self.alpha = alpha
-        self.w = torch.zeros(len(pattern.data), device=DEVICE, requires_grad=True)
+        self.w = torch.zeros(pattern.nnz, device=DEVICE, requires_grad=True)
         self.b = torch.zeros(1, device=DEVICE, requires_grad=True)
         d = direct.tocoo()
+        # the reference sets every direct weight to 1; dividing by the max reproduces that
+        # for an exact map and keeps any fuzzy link proportional to its similarity
         scale = max(float(np.abs(d.data).max()) if d.nnz else 1.0, 1e-12)
         self.direct_t = torch.sparse_coo_tensor(
             np.stack([d.col, d.row]), d.data / scale, self.shape[::-1],
             device=DEVICE, dtype=torch.float32).coalesce()
 
     def _Wt(self):
-        """W transposed, built by swapping the index rows rather than calling .t().
+        """W transposed, built by swapping index rows rather than calling ``.t()``.
 
-        torch.sparse.mm(sparse, dense) carries the gradient back to the sparse values, and
-        that is the only reason this never materialises the |Xf| x |Yf| matrix. Keep the
-        second argument DENSE: sparse @ sparse returns a sparse result, and adding a dense
-        bias to it raises "add(sparse, dense) is not supported".
+        ``torch.sparse.mm(sparse, dense)`` carries the gradient back to the sparse values,
+        which is the only reason this never materialises the |Xf| x |Yf| matrix. Keep the
+        second argument DENSE: sparse @ sparse returns sparse, and adding a dense bias to
+        that raises "add(sparse, dense) is not supported".
         """
         return torch.sparse_coo_tensor(self.idx.flip(0), self.w,
                                        self.shape[::-1]).coalesce()
 
-    def _margins(self, Xb, Y, Wt):
-        """(batch, n_items) margins.  ``Xb`` dense (batch, n_xf), ``Y`` sparse."""
-        proj = torch.sparse.mm(Wt, Xb.t())             # (n_yf, batch) dense
-        return torch.sparse.mm(Y, proj).t()            # (batch, n_items) dense
+    def _margins(self, Xb, Yt, Wt):
+        return torch.sparse.mm(Yt, torch.sparse.mm(Wt, Xb.t())).t()
 
-    def fit(self, X, Y, XY, epochs=20, lr=0.2, batch=256, cost=5.0, negs=64, seed=0, log=print):
+    def fit(self, X, Y, XY, cand, epochs=20, lr=0.2, batch=256, cost=5.0, pos_wt=1.0,
+            seed=0, log=print):
         g = torch.Generator().manual_seed(seed)
-        Xt = _to_torch(X)
         Yt = _to_torch(Y)
-        truth = XY.tocsr()
+        truth, cand = XY.tocsr(), cand.tocsr()
+        n_pairs = max(1, cand.nnz)
         opt = torch.optim.Adam([self.w, self.b], lr=lr)
         n = X.shape[0]
         for ep in range(epochs):
-            for pg in opt.param_groups:
+            for pg in opt.param_groups:      # linear decay, so late epochs settle
                 pg["lr"] = lr * (1 - ep / max(1, epochs))
             order = torch.randperm(n, generator=g).numpy()
             total = 0.0
             for lo in range(0, n, batch):
                 rows = order[lo:lo + batch]
-                Xb = _dense(X[rows])
-                m = self._margins(Xb, Yt, self._Wt()) + self.b
+                sel = torch.as_tensor(np.asarray(cand[rows].todense()) != 0, device=DEVICE)
+                if not sel.any():
+                    continue
+                tgt = torch.as_tensor(np.asarray(truth[rows].todense()) > 0, device=DEVICE)
+                m = self._margins(_dense(X[rows]), Yt, self._Wt()) + self.b
 
-                # positives from the truth, plus a sample of negatives -- scoring every
-                # item every step is affordable here but the gradient is dominated by
-                # easy negatives, and sampling is what the original does anyway
-                tgt = torch.zeros_like(m)
-                pr, pc = [], []
-                for r, i in enumerate(rows):
-                    lbl = truth.indices[truth.indptr[i]:truth.indptr[i + 1]]
-                    pr += [r] * len(lbl)
-                    pc += list(lbl)
-                tgt[pr, pc] = 1.0
-                pick = torch.randint(m.shape[1], (len(rows), negs), generator=g).to(m.device)
-                sel = torch.zeros_like(m, dtype=torch.bool)
-                sel[torch.arange(len(rows), device=m.device)[:, None], pick] = True
-                sel[pr, pc] = True
-
-                y = 2 * tgt - 1
+                y = torch.where(tgt, 1.0, -1.0)
                 hinge = torch.clamp(1 - y * m, min=0) ** 2
-                wt = torch.where(tgt > 0, cost * 10.0, cost)
-                loss = (hinge * wt * sel).sum() / sel.sum().clamp_min(1)
-                loss = loss + 0.5 * (self.w.pow(2).sum() + self.b.pow(2).sum()) / n
+                C = torch.where(tgt, cost * pos_wt, cost)
+                data = (hinge * C * sel).sum()
+                reg = 0.5 * (self.w.pow(2).sum() + self.b.pow(2).sum()) \
+                    * (int(sel.sum()) / n_pairs)
+                loss = (data + reg) / n_pairs
                 opt.zero_grad(set_to_none=True)
                 loss.backward()
                 opt.step()
                 total += float(loss.detach())
             if log and (ep + 1) % 5 == 0:
-                log(f"  zestxml epoch {ep + 1}/{epochs} loss {total / max(1, n // batch):.4f}")
+                log(f"  zestxml epoch {ep + 1}/{epochs} objective {total:.4f}")
         return self
 
     @torch.no_grad()
-    def scores(self, X, Y, batch=256):
+    def scores(self, X, Y, cand, batch=256):
+        """``alpha * bilinear + (1 - alpha) * knn``, zero outside the shortlist."""
         Yt, Wt = _to_torch(Y), self._Wt()
+        cand = cand.tocsr()
         out = torch.zeros(X.shape[0], Y.shape[0])
         for lo in range(0, X.shape[0], batch):
             Xb = _dense(X[lo:lo + batch])
+            sel = torch.as_tensor(np.asarray(cand[lo:lo + batch].todense()) != 0,
+                                  device=DEVICE)
             m = self._margins(Xb, Yt, Wt) + self.b
-            bil = torch.exp(-torch.clamp(1 - m, min=0) ** 2)   # margin -> positive score
+            bil = torch.exp(-torch.clamp(1 - m, min=0) ** 2)     # margin -> positive score
             knn = self._margins(Xb, Yt, self.direct_t)
-            out[lo:lo + batch] = (self.alpha * bil + (1 - self.alpha) * knn).cpu()
+            out[lo:lo + batch] = ((self.alpha * bil + (1 - self.alpha) * knn)
+                                  * sel).cpu()
         return out
 
 
 def _dense(m):
-    """A batch of points as a dense (batch, n_xf) tensor.
+    """A batch of points as a dense ``(batch, n_xf)`` tensor -- see :meth:`ZestXML._Wt`.
 
-    Dense on purpose -- see :meth:`ZestXML._Wt`. At 256 x ~30k features this is ~30 MB; if
-    you run this on a vocabulary ten times larger, drop ``batch`` rather than going sparse.
+    At 256 x ~30k features this is ~30 MB. On a vocabulary ten times larger, drop
+    ``batch`` rather than going sparse.
     """
     return torch.as_tensor(np.asarray(m.todense(), dtype=np.float32), device=DEVICE)
 
 
 def _to_torch(m):
-    m = m.tocoo()
+    m = sp.coo_matrix(m)
     return torch.sparse_coo_tensor(np.stack([m.row, m.col]), m.data.astype(np.float32),
                                    m.shape, device=DEVICE, dtype=torch.float32).coalesce()
 
 
-def run_zestxml(split, ctx=20, windows=8, seed=0, epochs=20, alpha=0.9,
+def run_zestxml(split, ctx=20, windows=8, seed=0, epochs=20, alpha=0.9, shorty_k=500,
                 bs_count=20, bs_alpha=0.02, direct_wt=0.8, min_df=2, log=print):
     """One point is a history prefix; its label is the next item.
 
@@ -502,15 +608,24 @@ def run_zestxml(split, ctx=20, windows=8, seed=0, epochs=20, alpha=0.9,
     def doc(prefix):
         return " ".join(text[i] for i in prefix[-ctx:])
 
-    trn_x, trn_y = [], []
+    # A training point is a prefix; its labels are the next ``horizon`` items -- the same
+    # multi-label target the evaluation uses. Training on a single next item and then
+    # scoring against a set would be a train/test mismatch, not a result.
+    H = split.horizon
+    trn_x, trn_rows, trn_cols = [], [], []
     for u, h in split.train.items():
-        full = h + ([split.val[u]] if u in split.val else [])
-        pos = list(range(1, len(full)))
-        if len(pos) > windows:
-            pos = sorted(rng.sample(pos, windows))
-        for k in pos:
+        full = h + split.val[u]
+        cuts = [k for k in range(1, len(full) - H + 1)]
+        if not cuts:
+            continue
+        if len(cuts) > windows:
+            cuts = sorted(rng.sample(cuts, windows))
+        for k in cuts:
+            r = len(trn_x)
             trn_x.append(doc(full[:k]))
-            trn_y.append(split.index[full[k]])
+            for it in sorted({i for i in full[k:k + H]}):
+                trn_rows.append(r)
+                trn_cols.append(split.index[it])
 
     tst_x = [doc(split.hist[u]) for u in split.users]
 
@@ -520,23 +635,41 @@ def run_zestxml(split, ctx=20, windows=8, seed=0, epochs=20, alpha=0.9,
     Xtr = _rownorm(vec.fit_transform(trn_x))
     Xte = _rownorm(vec.transform(tst_x))
     Xf = vec.get_feature_names_out().tolist()
-    Y, Yf = label_features(names)
-    Y = _rownorm(Y)
+    Y_full, Yf = label_features(names)
+    Y_full = _rownorm(Y_full)
 
-    XY = sp.csr_matrix((np.ones(len(trn_y), np.float32),
-                        (np.arange(len(trn_y)), np.array(trn_y))),
-                       shape=(len(trn_y), split.n_items))
+    XY = sp.csr_matrix((np.ones(len(trn_rows), np.float32), (trn_rows, trn_cols)),
+                       shape=(len(trn_x), split.n_items))
 
-    # Cold items must be invisible to the miner: their features stay (that is what makes
-    # them scorable) but they contribute no co-occurrence counts, because they have no
-    # training interaction to count.  XY already has no column for them.
-    log(f"  {Xtr.shape[0]} points, {len(Xf)} point features, {len(Yf)} label features")
-    pattern, direct = mine_pattern(Xtr, Y, XY, Xf, Yf, bs_count, bs_alpha, direct_wt)
-    log(f"  pattern nnz {pattern.nnz} ({len(direct.data)} from the direct map)")
+    # THE zero-shot mechanism, and the easiest thing to get wrong: a label with no training
+    # point has its features BLANKED for mining, shortlisting and training, and restored at
+    # prediction. Leave them in during training and cold items get sampled as negatives --
+    # the model learns to push down precisely what the cold column then asks it to rank up.
+    Y_train = Y_full.copy().tolil()
+    cold_rows = [split.index[i] for i in split.cold]
+    Y_train[cold_rows, :] = 0
+    Y_train = Y_train.tocsr()
+    Y_train.eliminate_zeros()
+
+    log(f"  {Xtr.shape[0]} points, {len(Xf)} point features, {len(Yf)} label features, "
+        f"{len(cold_rows)} labels blanked for training")
+    pattern, direct = mine_pattern(Xtr, Y_train, XY, Xf, Yf, bs_count, bs_alpha, direct_wt)
+    log(f"  pattern nnz {pattern.nnz} ({direct.nnz} from the direct map)")
+
+    trn_cand = shortlist(Xtr, Y_train, pattern, shorty_k)
+    log(f"  train shortlist recall {100.0 * _recall(trn_cand, XY):.2f}%")
+    tst_cand = shortlist(Xte, Y_full, pattern, shorty_k)
+    log(f"  test shortlist recall  {100.0 * _recall(tst_cand, split.truth):.2f}%  "
+        f"<- a hard ceiling on every metric below")
 
     model = ZestXML(pattern, direct, len(Xf), len(Yf), alpha=alpha)
-    model.fit(Xtr, Y, XY, epochs=epochs, seed=seed, log=log)
-    return model.scores(Xte, Y)
+    model.fit(Xtr, Y_train, XY, trn_cand, epochs=epochs, seed=seed, log=log)
+    return model.scores(Xte, Y_full, tst_cand)
+
+
+def _recall(cand, truth):
+    hit = cand.multiply(truth)
+    return hit.nnz / max(1, truth.nnz)
 
 
 def _unique_names(split):
@@ -615,13 +748,14 @@ def run_sasrec(split, content=None, d=50, maxlen=200, epochs=200, lr=1e-3, batch
                                                       device=DEVICE)
     model = SASRec(split.n_items, d=d, maxlen=maxlen, content=ct).to(DEVICE)
 
+    # SASRec keeps its own next-item training signal -- that is what the architecture is
+    # for, and handicapping it with a bag-of-items target would not make the comparison
+    # fairer. Only the *evaluation* is shared, and that is where the framing has to match.
     users = sorted(split.train)
     seq = np.zeros((len(users), maxlen), np.int64)
     pos = np.zeros((len(users), maxlen), np.int64)
     for r, u in enumerate(users):
-        h = [split.index[i] + 1 for i in split.train[u]]        # 1-based; 0 is pad
-        if u in split.val:
-            h.append(split.index[split.val[u]] + 1)
+        h = [split.index[i] + 1 for i in split.train[u] + split.val[u]]   # 1-based, 0 pads
         h = h[-(maxlen + 1):]
         seq[r, maxlen - len(h) + 1:] = h[:-1]
         pos[r, maxlen - len(h) + 1:] = h[1:]
@@ -689,20 +823,25 @@ def content_vectors(split, dim=128, seed=0):
 # =========================================================================== #
 # 6. runner
 # =========================================================================== #
-def main(dataset="ml-1m", cold_frac=0.1, sasrec_epochs=200, zest_epochs=20, ctx=20,
-         windows=8, seed=0, arms=("zestxml", "sasrec", "sasrec+content"), **loader_kw):
+def main(dataset="ml-1m", cold_frac=0.1, horizon=5, sasrec_epochs=200, zest_epochs=20,
+         ctx=20, windows=8, seed=0, shorty_k=500,
+         arms=("zestxml", "sasrec", "sasrec+content"), **loader_kw):
     seqs, titles = LOADERS[dataset](**loader_kw)
-    split = Split(seqs, titles, cold_frac=cold_frac, seed=seed)
+    split = Split(seqs, titles, cold_frac=cold_frac, horizon=horizon, seed=seed)
     groups = split.groups()
+    cold_pos = int(split.truth[:, groups["cold"]].sum())
     print(f"{len(split.train)} users, {split.n_items} items, {len(split.cold)} cold "
-          f"({100.0 * len(split.cold) / split.n_items:.1f}%), {len(split.users)} test "
-          f"points, {int(groups['cold'][split.targets].sum())} of them cold")
+          f"({100.0 * len(split.cold) / split.n_items:.1f}%)")
+    print(f"{len(split.users)} test points, {split.truth.nnz} positives "
+          f"({split.truth.nnz / max(1, len(split.users)):.2f} labels per point), "
+          f"{cold_pos} of them on cold items")
 
     rows = {}
     if "zestxml" in arms:
         print("\n=== zestxml")
         rows["zestxml"] = evaluate(
-            run_zestxml(split, ctx=ctx, windows=windows, seed=seed, epochs=zest_epochs),
+            run_zestxml(split, ctx=ctx, windows=windows, seed=seed, epochs=zest_epochs,
+                        shorty_k=shorty_k),
             split, groups)
     content = content_vectors(split, seed=seed)
     for name, ct in (("sasrec", None), ("sasrec+content", content)):
