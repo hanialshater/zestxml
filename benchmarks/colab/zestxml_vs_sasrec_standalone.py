@@ -944,6 +944,15 @@ def main(dataset="ml-1m", cold_frac=0.1, horizon=5, sasrec_epochs=200, zest_epoc
           f"({split.truth.nnz / max(1, len(split.users)):.2f} labels per point), "
           f"{cold_pos} of them on cold items")
     profile(split)
+    # both models return a dense (n_users, n_items) score matrix, so this product is the
+    # memory wall long before anything else is. Say so up front rather than dying inside
+    # an arm 20 minutes in.
+    cells = len(split.users) * split.n_items
+    print(f"  score matrix {len(split.users)} x {split.n_items} = "
+          f"{4.0 * cells / 1e9:.2f} GB per arm")
+    if cells > 4e8:
+        print("  WARNING: that will not fit comfortably. Lower max_users (amazon) or "
+              "raise min_len to shrink the catalogue.")
 
     rows = {}
     if "random" in arms:
