@@ -789,3 +789,61 @@ same regime as published work rather than an order off. That was the open questi
 
 Not yet run on this dataset: the `--unseen_frac 0.1` zero-shot split, which is the setting
 every other experiment in this file is about.
+
+
+# ZestXML vs SASRec, as an XMC task (ml-1m)
+
+`benchmarks/colab/zestxml_vs_sasrec_standalone.py`. A point is a user; its labels are the
+set of items touched in the next 5 steps. 10% of the catalogue is removed from training
+entirely — every occurrence deleted from every training history, surviving only inside test
+windows, so a cold item has exactly zero training interactions. 6040 users, 3706 items, 371
+cold, 5.00 labels per point, 3690 of 30200 positives on cold items. Shortlist recall:
+78.76% train, **48.88% test**.
+
+Head/tail/cold rows mask every label outside the group, the way the reference splits seen
+from unseen.
+
+| model | group | P@1 | P@5 | nDCG@5 | PSP@5 |
+|---|---|---|---|---|---|
+| zestxml | all | 8.16 | 6.15 | 6.57 | 3.07 |
+| **sasrec** | all | **12.88** | **10.36** | **10.89** | **5.31** |
+| sasrec+content | all | 12.88 | 10.25 | 10.83 | 5.28 |
+| zestxml | head | 8.44 | 6.34 | 9.58 | 10.37 |
+| sasrec | head | **14.25** | **10.91** | **16.72** | **18.15** |
+| zestxml | tail | 5.09 | 3.18 | 5.74 | 6.54 |
+| sasrec+content | tail | **8.15** | 6.03 | **11.26** | **12.33** |
+| zestxml | **cold** | 1.07 | 1.07 | 2.66 | 4.17 |
+| sasrec | **cold** | 0.97 | 0.59 | 1.56 | 2.30 |
+| **sasrec+content** | **cold** | **1.91** | **1.93** | **4.88** | **7.53** |
+
+**SASRec wins everywhere, including cold — which reverses the earlier reading here.** An
+earlier version of this comparison used leave-one-out next-item with Recall@k over the full
+catalogue and reported plain SASRec at *exactly* 0.00 on cold items against ZestXML's 1.34,
+concluding that the text channel owned the cold column. Under the XMC framing that is
+wrong: the content-fed SASRec reaches P@1 1.91 and PSP@5 7.53 against ZestXML's 1.07 and
+4.17 — roughly 1.8x on both.
+
+**Why the two framings disagree.** The group rows mask every label outside the group, so
+the cold row asks "rank the 371 cold items", not "surface a cold item against 3706". The
+second question has a floor of zero for a model whose cold embeddings were never touched;
+the first does not. Both are legitimate; they are not the same measurement, and the earlier
+conclusion was an artifact of only ever asking the second.
+
+**One number in that table is not yet interpretable.** Plain SASRec scores 0.97 P@1 on cold
+items despite having no trained parameters for them. With 371 cold labels and 1.28 cold
+positives per qualifying point, uniform chance is about 0.35% — so 0.97 is roughly 2.8x
+chance, at about 5 sigma over 2884 points. The likely mechanism is not transfer but
+degenerate ordering: a fixed ranking that happens to put a test-frequent cold item first
+scores well without knowing anything. `random` and `popularity` control rows have been
+added to the runner for exactly this reason; until they are in the table, no cold number
+above should be read as evidence of transfer.
+
+**What this suggests about the mechanism.** A learned projection from tf-idf into the
+sequence encoder's embedding space does the same job as ZestXML's shared label features,
+and does it better here, because it is trained jointly with the encoder rather than bolted
+onto a bag-of-words scorer. That is the same lesson as the IRENE result recorded above --
+the encoder term is not optional -- arriving from a different direction.
+
+**Caveat that bounds all of it:** test shortlist recall is 48.88%, so ZestXML could not
+retrieve more than half the positives no matter how well it ranked. `shorty_k` needs
+raising until that plateaus before the gap is attributed to the model.

@@ -9,26 +9,15 @@ be edited: the pattern miner, the bilinear scorer, the SASRec block, the split, 
 
 WHAT THIS IS AND IS NOT
 -----------------------
-This is a *compact reimplementation* of ZestXML's mechanism (~200 lines), not the full
-port. It reproduces: tf-idf point features, label feature bags, the exact-match direct map,
-the Jaccard-style pattern miner, W confined to that pattern, and the
-``alpha * bilinear + (1 - alpha) * knn`` blend. It drops the file formats, the parameter
-system, the chunked kernels, propensity metrics, and the approximate shortlist -- at a few
-thousand items every score matrix fits in memory, so it ranks the full catalogue directly.
-It also trains against sampled negatives rather than a mined shortlist, which is the one
-substantive difference in the learning signal.
-
-So the numbers here are NOT the full port's. For reference, the full port on ml-1m
-(cold_frac 0.1, 200 SASRec epochs, shortyK 500), Recall@10 / Recall@50:
-
-    zestxml          all  6.77 / 13.81   head 10.10 / 17.30   tail 4.88 / 10.14   cold 1.34 / 10.70
-    sasrec           all 19.93 / 43.05   head 30.30 / 61.37   tail 16.00 / 41.16   cold 0.00 /  0.00
-    sasrec+content   all 19.59 / 43.94   head 30.00 / 61.17   tail 14.86 / 42.14   cold 0.75 /  3.51
-
-The SASRec side of this file is the same code that produced those, so it should match. The
-ZestXML side will not, and at the time of writing it had not been calibrated against them
-at matched settings. Compare arms *within* one run of this file; do not mix its ZestXML row
-with the table above.
+A compact reimplementation of ZestXML's mechanism (~250 lines), not the full port. It
+reproduces the parts that decide the numbers: tf-idf point features, label feature bags,
+the exact-match direct map, the two-direction Jaccard pattern miner with de-duplication,
+W confined to that pattern, features of a zero-interaction label blanked for training and
+restored at prediction, training on mined shortlist pairs with the weighted squared hinge,
+prediction restricted to the shortlist, and the ``alpha * bilinear + (1 - alpha) * knn``
+blend. It drops the file formats, the parameter system and the chunked kernels: margins are
+computed densely per batch and masked to the shortlist, which is exactly equivalent below
+roughly 100k labels and much shorter.
 
 THE COMPARISON
 --------------
@@ -821,11 +810,35 @@ def content_vectors(split, dim=128, seed=0):
 
 
 # =========================================================================== #
+# 5b. controls  --  the rows that make the others readable
+# =========================================================================== #
+def run_popularity(split):
+    """Rank every item by training frequency, identically for every user.
+
+    Include this or the cold column is uninterpretable.  Group metrics mask every label
+    outside the group, so the cold row asks "rank the 371 cold items", not "surface a cold
+    item against the whole catalogue".  That question has a floor well above zero, and a
+    model with no parameters for cold items can still beat uniform chance simply by
+    ordering them in a fixed way that happens to put a test-frequent one first.  Any cold
+    number that does not clear this row is measuring popularity, not transfer.
+    """
+    return torch.as_tensor(split.count, dtype=torch.float32)[None, :].repeat(
+        len(split.users), 1)
+
+
+def run_random(split, seed=0):
+    """Uniform random scores -- the true chance floor for every column."""
+    g = torch.Generator().manual_seed(seed)
+    return torch.rand(len(split.users), split.n_items, generator=g)
+
+
+# =========================================================================== #
 # 6. runner
 # =========================================================================== #
 def main(dataset="ml-1m", cold_frac=0.1, horizon=5, sasrec_epochs=200, zest_epochs=20,
          ctx=20, windows=8, seed=0, shorty_k=500,
-         arms=("zestxml", "sasrec", "sasrec+content"), **loader_kw):
+         arms=("random", "popularity", "zestxml", "sasrec", "sasrec+content"),
+         **loader_kw):
     seqs, titles = LOADERS[dataset](**loader_kw)
     split = Split(seqs, titles, cold_frac=cold_frac, horizon=horizon, seed=seed)
     groups = split.groups()
@@ -837,6 +850,10 @@ def main(dataset="ml-1m", cold_frac=0.1, horizon=5, sasrec_epochs=200, zest_epoc
           f"{cold_pos} of them on cold items")
 
     rows = {}
+    if "random" in arms:
+        rows["random"] = evaluate(run_random(split, seed), split, groups)
+    if "popularity" in arms:
+        rows["popularity"] = evaluate(run_popularity(split), split, groups)
     if "zestxml" in arms:
         print("\n=== zestxml")
         rows["zestxml"] = evaluate(
