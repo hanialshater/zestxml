@@ -847,3 +847,51 @@ the encoder term is not optional -- arriving from a different direction.
 **Caveat that bounds all of it:** test shortlist recall is 48.88%, so ZestXML could not
 retrieve more than half the positives no matter how well it ranked. `shorty_k` needs
 raising until that plateaus before the gap is attributed to the model.
+
+
+## Why ml-1m was close to a worst case, measured
+
+The `profile()` row now printed before every run, on ml-1m:
+
+    items 3706, interactions/item mean 255.6 median 112, 13.0% under 10
+    title tokens: 3382 distinct, a token is shared by 4.3 items on average;
+      mean over items of that figure is 448.8
+    labels/point 5.00
+
+Three numbers decide whether a text channel can beat an id embedding, and ml-1m sets all
+three against it. A median of 112 interactions per item makes a per-item embedding trivially
+learnable. Only 13% of items sit under 10 interactions, so there is almost no tail for
+shared features to rescue. And **the average item's title tokens are shared by 449 other
+items** -- `Toy Story (1995) Animation Children's Comedy` is three genre words and a name --
+so the label feature bag cannot identify anything, and all the discriminative power sits in
+the per-label identity feature, which is exactly what a cold item does not have.
+
+Thinning interactions to 20% moves density hard (47.2 per item, 30.8% under 10) and barely
+moves discriminativeness (421.2). So on this dataset the binding problem is the *text*, not
+the sparsity, and no amount of thinning will make it a fair test. `keep_frac` is in the
+runner to check that claim rather than assert it.
+
+## The cold column, with its floor
+
+Uniform random scores, same masking, same metric:
+
+| group | random P@1 |
+|---|---|
+| all | 0.18 |
+| head | 0.63 |
+| tail | 0.13 |
+| **cold** | **0.31** |
+
+Against that floor the cold row of the table above reads very differently:
+
+| model | cold P@1 | x chance |
+|---|---|---|
+| sasrec | 0.97 | 3.1x |
+| zestxml | 1.07 | 3.4x |
+| **sasrec+content** | **1.91** | **6.1x** |
+
+**Neither ZestXML nor plain SASRec meaningfully solves cold-start on ml-1m** -- both sit
+around 3x a chance baseline on a 371-label problem, which is a weak signal, and the earlier
+reading of ZestXML's 1.07 as a win over SASRec's 0.97 was comparing two numbers that are
+both close to the floor. Only the content-projected SASRec is clearly above it. This is the
+control that should have been in the first table.

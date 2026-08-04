@@ -289,30 +289,105 @@ def _metrics(scores, truth, inv_prop, ks=KS):
     return out
 
 
-def evaluate(scores, split, groups):
+def evaluate(scores, split, groups, chunk=2048):
     """``scores`` dense (n_users, n_items). One row per label group.
 
-    Items already in the user's history are masked out: ZestXML has no notion of a
-    sequence and would otherwise re-recommend what the user just consumed, which is not a
-    prediction. A group row masks every label outside the group to -inf on the score side
-    and to zero on the truth side, exactly as the reference does for seen/unseen.
-    """
-    scores = torch.as_tensor(scores).clone().float().cpu()
-    for r, h in enumerate(split.test_hist):
-        if h:
-            scores[r, torch.as_tensor(h)] = -np.inf
-    truth = torch.as_tensor(np.asarray(split.truth.todense()), dtype=torch.float32)
-    inv_prop = inv_propensity(split.count.astype(np.float64), len(split.train))
+    Chunked over users, and deliberately so: the group rows mask labels, and masking used
+    to clone the whole score matrix once per group. At ml-1m's 6040 x 3706 that is
+    invisible; at an Amazon catalogue of 100k+ items it is several copies of a matrix that
+    already does not fit. Every statistic here is a mean or a ratio of sums, so all of them
+    accumulate.
 
-    rows = {"all": _metrics(scores, truth, inv_prop)}
-    for name, mask in groups.items():
-        m = torch.as_tensor(mask)
-        s = scores.clone()
-        s[:, ~m] = -np.inf
-        r = _metrics(s, truth * m[None, :].float(), inv_prop)
-        if r is not None:
-            rows[name] = r
+    Items already in the user's history are masked out: ZestXML has no notion of a sequence
+    and would otherwise re-recommend what the user just consumed, which is not a prediction.
+    """
+    scores = torch.as_tensor(scores)
+    inv_prop = torch.as_tensor(
+        inv_propensity(split.count.astype(np.float64), len(split.train)),
+        dtype=torch.float32)
+    names = ["all"] + list(groups)
+    masks = {"all": None, **{g: torch.as_tensor(m) for g, m in groups.items()}}
+    acc = {g: defaultdict(float) for g in names}
+
+    for lo in range(0, scores.shape[0], chunk):
+        hi = min(lo + chunk, scores.shape[0])
+        base = scores[lo:hi].clone().float().cpu()
+        for r in range(lo, hi):
+            h = split.test_hist[r]
+            if h:
+                base[r - lo, torch.as_tensor(h)] = -np.inf
+        truth = torch.as_tensor(
+            np.asarray(split.truth[lo:hi].todense()), dtype=torch.float32)
+        for g in names:
+            m = masks[g]
+            s_ = base if m is None else base.masked_fill(~m[None, :], -np.inf)
+            t_ = truth if m is None else truth * m[None, :].float()
+            _accumulate(acc[g], s_, t_, inv_prop)
+
+    rows = {}
+    for g in names:
+        a = acc[g]
+        if a["points"] < 1:
+            continue
+        row = {"points": int(a["points"])}
+        for k in KS:
+            row[f"P@{k}"] = 100.0 * a[f"hits@{k}"] / a["points"]
+            row[f"nDCG@{k}"] = 100.0 * a[f"ndcg@{k}"] / a["points"]
+            row[f"PSP@{k}"] = 100.0 * a[f"gain@{k}"] / max(a[f"best@{k}"], 1e-9)
+        rows[g] = row
     return rows
+
+
+def _accumulate(acc, scores, truth, inv_prop):
+    keep = truth.sum(1) > 0      # points with nothing to retrieve carry no information
+    scores, truth = scores[keep], truth[keep]
+    if scores.shape[0] == 0:
+        return
+    ks = [k for k in KS if k <= scores.shape[1]]
+    acc["points"] += int(scores.shape[0])
+    top = torch.topk(scores, max(ks), dim=1).indices
+    hits = torch.gather(truth, 1, top)
+    gain = torch.gather(inv_prop[None, :].expand_as(truth), 1, top) * hits
+    for k in ks:
+        acc[f"hits@{k}"] += float(hits[:, :k].sum(1).div(k).sum())
+        disc = 1.0 / torch.log2(torch.arange(k, dtype=torch.float) + 2)
+        dcg = (hits[:, :k] * disc[None, :]).sum(1)
+        ideal = torch.cat([torch.zeros(1), disc.cumsum(0)])[truth.sum(1).clamp(max=k).long()]
+        acc[f"ndcg@{k}"] += float((dcg / ideal).sum())
+        acc[f"gain@{k}"] += float(gain[:, :k].sum())
+        # the best achievable propensity-weighted gain, i.e. the PSP denominator
+        acc[f"best@{k}"] += float(
+            torch.sort(truth * inv_prop[None, :], dim=1, descending=True).values[:, :k].sum())
+
+
+def profile(split):
+    """The three quantities that decide whether a text channel can beat an id embedding.
+
+    Print this before reading any table. A dataset where items are few, densely observed
+    and weakly described is one where a per-item embedding is trivially learnable and the
+    text adds nothing -- ml-1m is exactly that, and reading a ZestXML loss on it as a
+    statement about the method is a mistake.
+
+    * **items, and interactions per item.** Below a few dozen interactions an embedding is
+      poorly estimated and shared features have something to add. ml-1m sits near 270.
+    * **text discriminativeness.** If a title's tokens are shared by hundreds of other
+      items, the label feature bag cannot identify anything and only the per-label identity
+      feature carries signal -- which is precisely what a cold item does not have.
+    """
+    warm = split.count[split.count > 0]
+    tok_owners = defaultdict(set)
+    for i in split.items:
+        for t in set(split.titles.get(i, "").lower().split()):
+            if t.isalnum():
+                tok_owners[t].add(i)
+    per_item = [np.mean([len(tok_owners[t]) for t in set(split.titles.get(i, "").lower().split())
+                         if t in tok_owners] or [0]) for i in split.items]
+    print(f"  items {split.n_items}, interactions/item mean {warm.mean():.1f} "
+          f"median {np.median(warm):.0f}, {100.0 * (warm < 10).mean():.1f}% under 10")
+    print(f"  title tokens: {len(tok_owners)} distinct, a token is shared by "
+          f"{np.mean([len(v) for v in tok_owners.values()]):.1f} items on average; "
+          f"mean over items of that figure is {np.mean(per_item):.1f}")
+    print(f"  labels/point {split.truth.nnz / max(1, len(split.users)):.2f}")
 
 
 def print_table(rows):
@@ -835,11 +910,31 @@ def run_random(split, seed=0):
 # =========================================================================== #
 # 6. runner
 # =========================================================================== #
+def thin(seqs, keep_frac, seed=0):
+    """Drop a fraction of every user's interactions, keeping the catalogue fixed.
+
+    The cleanest way to find where the two methods cross without hunting for datasets:
+    hold items and text constant and slide interactions-per-item down until a per-item
+    embedding stops being learnable. If the ordering never flips under thinning, the text
+    is the problem, not the density.
+    """
+    if keep_frac >= 1.0:
+        return seqs
+    rng = random.Random(seed)
+    out = {}
+    for u, s in seqs.items():
+        keep = [i for i in s if rng.random() < keep_frac]
+        if len(keep) >= 4:
+            out[u] = keep
+    return out
+
+
 def main(dataset="ml-1m", cold_frac=0.1, horizon=5, sasrec_epochs=200, zest_epochs=20,
-         ctx=20, windows=8, seed=0, shorty_k=500,
+         ctx=20, windows=8, seed=0, shorty_k=500, keep_frac=1.0,
          arms=("random", "popularity", "zestxml", "sasrec", "sasrec+content"),
          **loader_kw):
     seqs, titles = LOADERS[dataset](**loader_kw)
+    seqs = thin(seqs, keep_frac, seed)
     split = Split(seqs, titles, cold_frac=cold_frac, horizon=horizon, seed=seed)
     groups = split.groups()
     cold_pos = int(split.truth[:, groups["cold"]].sum())
@@ -848,6 +943,7 @@ def main(dataset="ml-1m", cold_frac=0.1, horizon=5, sasrec_epochs=200, zest_epoc
     print(f"{len(split.users)} test points, {split.truth.nnz} positives "
           f"({split.truth.nnz / max(1, len(split.users)):.2f} labels per point), "
           f"{cold_pos} of them on cold items")
+    profile(split)
 
     rows = {}
     if "random" in arms:
