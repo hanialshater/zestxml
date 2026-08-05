@@ -659,6 +659,19 @@ class ZestXML:
 
     def fit(self, X, Y, XY, cand, epochs=20, lr=0.2, batch=256, cost=5.0, pos_wt=1.0,
             seed=0, log=print):
+        """``lr`` 0.2 is the reference default and is not a typo next to SASRec's 1e-3.
+
+        The two are not comparable quantities. Here every parameter is one scalar on one
+        mined ``(xf, yf)`` pair, starts at exactly zero, and is touched only by the points
+        whose features hit that pair -- a rare pair may see a handful of gradients in the
+        whole run, so the step has to be large or it never leaves zero. SASRec's parameters
+        are dense embedding and attention weights updated every batch. Tuning one towards
+        the other makes things worse in both directions.
+
+        Watch the printed objective: flat from the first report means the step is too
+        large and the squared hinge is saturating; still falling steeply at the last epoch
+        means raise ``epochs`` before touching ``lr``.
+        """
         g = torch.Generator().manual_seed(seed)
         Yt = _to_torch(Y)
         truth, cand = XY.tocsr(), cand.tocsr()
@@ -726,8 +739,9 @@ def _to_torch(m):
                                    m.shape, device=DEVICE, dtype=torch.float32).coalesce()
 
 
-def run_zestxml(split, ctx=20, windows=8, seed=0, epochs=20, alpha=0.9, shorty_k=500,
-                bs_count=20, bs_alpha=0.02, direct_wt=0.8, min_df=2, log=print):
+def run_zestxml(split, ctx=20, windows=8, seed=0, epochs=20, lr=0.2, alpha=0.9,
+                shorty_k=500, bs_count=20, bs_alpha=0.02, direct_wt=0.8, min_df=2,
+                log=print):
     """One point is a history prefix; its label is the next item.
 
     ``ctx`` bounds how many recent items form the text -- a 200-item history averaged into
@@ -796,7 +810,7 @@ def run_zestxml(split, ctx=20, windows=8, seed=0, epochs=20, alpha=0.9, shorty_k
         f"<- a hard ceiling on every metric below")
 
     model = ZestXML(pattern, direct, len(Xf), len(Yf), alpha=alpha)
-    model.fit(Xtr, Y_train, XY, trn_cand, epochs=epochs, seed=seed, log=log)
+    model.fit(Xtr, Y_train, XY, trn_cand, epochs=epochs, lr=lr, seed=seed, log=log)
     return model.scores(Xte, Y_full, tst_cand)
 
 
@@ -876,6 +890,10 @@ class SASRec(nn.Module):
 
 def run_sasrec(split, content=None, d=50, maxlen=200, epochs=200, lr=1e-3, batch=128,
                seed=0, log=print):
+    """``lr`` 1e-3 with betas (0.9, 0.98) is the paper's setting; leave it unless the loss
+    curve says otherwise. On a small or heavily k-cored dataset this net will drive the
+    loss into the low tenths by memorising -- a curve that keeps falling while the metrics
+    do not is overfitting, and the fix is fewer epochs or more data, not a smaller step."""
     torch.manual_seed(seed)
     ct = None if content is None else torch.as_tensor(content, dtype=torch.float32,
                                                       device=DEVICE)
@@ -1000,6 +1018,7 @@ def thin(seqs, keep_frac, seed=0):
 
 def main(dataset="ml-1m", cold_frac=0.1, horizon=5, sasrec_epochs=200, zest_epochs=20,
          ctx=20, windows=8, seed=0, shorty_k=500, keep_frac=1.0,
+         zest_lr=0.2, sasrec_lr=1e-3,
          min_user=5, min_item=5, max_test_users=None,
          arms=("random", "popularity", "zestxml", "sasrec", "sasrec+content"),
          **loader_kw):
@@ -1035,14 +1054,15 @@ def main(dataset="ml-1m", cold_frac=0.1, horizon=5, sasrec_epochs=200, zest_epoc
         print("\n=== zestxml")
         rows["zestxml"] = evaluate(
             run_zestxml(split, ctx=ctx, windows=windows, seed=seed, epochs=zest_epochs,
-                        shorty_k=shorty_k),
+                        lr=zest_lr, shorty_k=shorty_k),
             split, groups)
     content = content_vectors(split, seed=seed)
     for name, ct in (("sasrec", None), ("sasrec+content", content)):
         if name in arms:
             print(f"\n=== {name}")
             rows[name] = evaluate(
-                run_sasrec(split, content=ct, epochs=sasrec_epochs, seed=seed),
+                run_sasrec(split, content=ct, epochs=sasrec_epochs, lr=sasrec_lr,
+                           seed=seed),
                 split, groups)
 
     print("\n" + "=" * 72)
