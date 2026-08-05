@@ -109,7 +109,8 @@ def load_ml1m(root="raw/ml-1m", min_len=5):
 AMZ = "https://mcauleylab.ucsd.edu/public_datasets/data/amazon_2023"
 
 
-def load_amazon(root=None, category="Video_Games", min_len=5, max_users=None):
+def load_amazon(root=None, category="Video_Games", min_len=5, max_users=None,
+                n_cats=0):
     """Amazon Reviews 2023.  NOTE: this download was never reachable from the machine
     this file was written on, so the URLs are untested (the parsing is tested).  If it
     fails, fetch the two files by hand from https://amazon-reviews-2023.github.io/ .
@@ -141,8 +142,11 @@ def load_amazon(root=None, category="Video_Games", min_len=5, max_users=None):
                 continue
             key, title = row.get("parent_asin"), (row.get("title") or "").strip()
             if key and title:
-                cats = row.get("categories") or []
-                titles[key] = " ".join([title] + [str(c) for c in cats[:3]])
+                # categories are a hierarchy from generic to specific, so cats[:3] appends
+                # "Video Games" to every item in the Video_Games file and buries the title
+                # under tokens shared by the whole catalogue. Take the tail, or nothing.
+                cats = (row.get("categories") or [])[-n_cats:] if n_cats else []
+                titles[key] = " ".join([title] + [str(c) for c in cats])
 
     events = defaultdict(list)
     with gzip.open(f"{root}/{category}.csv.gz", "rt", errors="replace") as f:
@@ -173,6 +177,40 @@ LOADERS = {"ml-1m": load_ml1m, "amazon": load_amazon}
 # =========================================================================== #
 # 2. split  --  XMC framing: one point per user, a SET of future items as labels
 # =========================================================================== #
+def kcore(seqs, min_user=5, min_item=5, log=print):
+    """Iteratively drop users and items below a support threshold, until stable.
+
+    Standard practice, and not optional here. Subsampling users without filtering items
+    leaves a catalogue sized for the *original* population: an Amazon run truncated to 5000
+    users kept 13722 items for the 662 who survived the length filter, giving 1.6
+    interactions per item and 99.4% of items under 10. Every arm then scored at the noise
+    floor, which looks like a result and is an artifact.
+    """
+    seqs = {u: list(s) for u, s in seqs.items()}
+    while True:
+        count = defaultdict(int)
+        for s in seqs.values():
+            for i in s:
+                count[i] += 1
+        pruned, changed = {}, False
+        for u, s in seqs.items():
+            keep = [i for i in s if count[i] >= min_item]
+            if len(keep) != len(s):
+                changed = True
+            if len(keep) >= min_user:
+                pruned[u] = keep
+            else:
+                changed = True
+        seqs = pruned
+        if not changed:
+            break
+    if log:
+        items = {i for s in seqs.values() for i in s}
+        log(f"  {min_user}/{min_item}-core: {len(seqs)} users, {len(items)} items, "
+            f"{sum(len(s) for s in seqs.values())} interactions")
+    return seqs
+
+
 class Split:
     """Time-ordered split with a future *window* as the target, plus a cold item set.
 
@@ -192,25 +230,37 @@ class Split:
     exactly zero training interactions -- not few, zero.
     """
 
-    def __init__(self, seqs, titles, cold_frac=0.1, horizon=5, seed=0):
+    def __init__(self, seqs, titles, cold_frac=0.1, horizon=5, seed=0,
+                 max_test_users=None, log=print):
         rng = random.Random(seed)
         self.titles, self.horizon = titles, horizon
+        H = horizon
+
+        # A user needs a training prefix, a validation window and a test window to exist at
+        # all. Filter first, and say how many that costs: on Amazon 5-core with horizon 5
+        # the requirement is 12 interactions and it removes most of the population, which
+        # is worth knowing before reading a table built on what is left.
+        before = len(seqs)
+        seqs = {u: s for u, s in seqs.items() if len(s) >= 2 * H + 2}
+        if log and before and len(seqs) < 0.6 * before:
+            log(f"  NOTE: {before - len(seqs)} of {before} users dropped for having fewer "
+                f"than {2 * H + 2} interactions (horizon {H} needs that many). Lower "
+                f"horizon, or raise min_len upstream.")
+
+        # the catalogue comes from the users who SURVIVE, never from the input population
         self.items = sorted({i for s in seqs.values() for i in s})
         self.index = {it: k for k, it in enumerate(self.items)}
-        H = horizon
 
         self.cold = set()
         if cold_frac > 0:
             # only items that land in somebody's test window can be held out and still be
             # measured; a cold item nobody is tested on is noise, not signal
-            pool = sorted({i for s in seqs.values() if len(s) >= 2 * H + 2 for i in s[-H:]})
+            pool = sorted({i for s in seqs.values() for i in s[-H:]})
             rng.shuffle(pool)
             self.cold = set(pool[:int(round(cold_frac * len(self.items)))])
 
         self.train, self.val, self.test, self.hist = {}, {}, {}, {}
         for u, s in seqs.items():
-            if len(s) < 2 * H + 2:
-                continue
             head, vwin, twin = s[:-2 * H], s[-2 * H:-H], s[-H:]
             head = [i for i in head if i not in self.cold]
             vwin = [i for i in vwin if i not in self.cold]
@@ -226,12 +276,31 @@ class Split:
             for i in h:
                 self.count[self.index[i]] += 1
 
+        # Evaluated users are decoupled from training users on purpose. Both models emit
+        # a dense (n_users, n_items) score matrix, so evaluation size is the memory wall --
+        # and capping the *dataset* instead is what produced a 1.6-interactions-per-item
+        # catalogue on the first Amazon run. Train on everything, score a sample.
         self.users = sorted(self.test)
+        if max_test_users and len(self.users) > max_test_users:
+            self.users = sorted(rng.sample(self.users, max_test_users))
+            if log:
+                log(f"  evaluating {max_test_users} of {len(self.test)} users "
+                    f"(training uses all of them)")
         rows = [r for r, u in enumerate(self.users) for _ in self.test[u]]
         cols = [self.index[i] for u in self.users for i in self.test[u]]
         self.truth = sp.csr_matrix((np.ones(len(rows), np.float32), (rows, cols)),
                                    shape=(len(self.users), self.n_items))
         self.test_hist = [[self.index[i] for i in self.hist[u]] for u in self.users]
+
+        # If most of the test signal is cold, "cold" has stopped being a held-out condition
+        # and has become the task. The metric is still computed, it just no longer means
+        # what the column header says.
+        cold_mask = self.count == 0
+        cold_pos = int(self.truth[:, cold_mask].sum()) if self.truth.nnz else 0
+        if log and self.truth.nnz and cold_pos > 0.25 * self.truth.nnz:
+            log(f"  WARNING: {100.0 * cold_pos / self.truth.nnz:.0f}% of test positives are "
+                f"on cold items. Lower cold_frac, or apply a stronger k-core -- on a sparse "
+                f"catalogue a 10% cold fraction takes most of the test set with it.")
 
     @property
     def n_items(self):
@@ -931,11 +1000,14 @@ def thin(seqs, keep_frac, seed=0):
 
 def main(dataset="ml-1m", cold_frac=0.1, horizon=5, sasrec_epochs=200, zest_epochs=20,
          ctx=20, windows=8, seed=0, shorty_k=500, keep_frac=1.0,
+         min_user=5, min_item=5, max_test_users=None,
          arms=("random", "popularity", "zestxml", "sasrec", "sasrec+content"),
          **loader_kw):
     seqs, titles = LOADERS[dataset](**loader_kw)
     seqs = thin(seqs, keep_frac, seed)
-    split = Split(seqs, titles, cold_frac=cold_frac, horizon=horizon, seed=seed)
+    seqs = kcore(seqs, min_user=min_user, min_item=min_item)
+    split = Split(seqs, titles, cold_frac=cold_frac, horizon=horizon, seed=seed,
+                  max_test_users=max_test_users)
     groups = split.groups()
     cold_pos = int(split.truth[:, groups["cold"]].sum())
     print(f"{len(split.train)} users, {split.n_items} items, {len(split.cold)} cold "
