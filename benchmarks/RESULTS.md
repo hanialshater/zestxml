@@ -895,3 +895,46 @@ around 3x a chance baseline on a 371-label problem, which is a weak signal, and 
 reading of ZestXML's 1.07 as a win over SASRec's 0.97 was comparing two numbers that are
 both close to the floor. Only the content-projected SASRec is clearly above it. This is the
 control that should have been in the first table.
+
+
+## Amazon Video_Games: the cold column, on a dataset where the text carries identity
+
+Same harness, 8/20-core, `n_cats=0`, horizon 3, cold_frac 0.05. 13694 users, 2885 items,
+4000 evaluated, 3.00 labels per point, 692 of 12000 positives cold. Profile:
+
+    items 2885, interactions/item mean 49.1 median 30, 3.4% under 10
+    title tokens: a token is shared by 6.2 items on average;
+      mean over items of that figure is 151.4
+
+Compare that last figure to ml-1m's 448.8 and to the first, broken Amazon run's 3812.3. It
+is the single number that decides whether a label feature bag can identify anything.
+
+| model | all P@1 | head P@1 | tail P@1 | **cold P@1** | **cold PSP@5** |
+|---|---|---|---|---|---|
+| random | 0.10 | 0.32 | 0.00 | 0.46 | 2.60 |
+| popularity | 1.70 | 2.20 | 0.09 | 0.31 | 3.03 |
+| zestxml | 3.05 | 4.31 | 2.04 | **4.92** | **14.31** |
+| **sasrec** | **4.10** | **5.67** | 2.57 | 0.46 | 3.18 |
+| sasrec+content | 3.88 | 5.57 | **2.78** | 0.77 | 4.77 |
+
+**The trade is now demonstrated rather than asserted.** SASRec wins every column with
+training signal behind it -- all, head, tail. ZestXML wins cold by 6.4x on P@1 and 3.0x on
+PSP@5 against the strongest baseline, and by 10.7x on P@1 against chance. Plain SASRec sits
+exactly at the random floor there, which is what a model with untrained embeddings for
+those items should do.
+
+**Content projection is not a substitute for scoring through the label's own words.**
+`sasrec+content` gets the same tf-idf text ZestXML gets, through a learned linear map. It
+buys the *tail* (2.78 against plain SASRec's 2.57, the best tail number in the table) and
+almost nothing on cold (0.77 against 4.92). A projection trained on warm items transfers to
+rare ones; it does not manufacture a representation for an item the encoder has never seen.
+
+**Why this contradicts the ml-1m section above.** There, `sasrec+content` beat ZestXML on
+cold and both sat near the floor. The difference is entirely the text: ml-1m's average item
+shares its title tokens with 449 others, so the feature bag carries no identity and only
+the per-label identity feature -- exactly what a cold item lacks -- discriminates. The
+ml-1m conclusion was a statement about movie genres, not about the method.
+
+**Caveat bounding ZestXML's warm columns:** test shortlist recall is 48.61%, so head and
+tail are retrieval-capped rather than ranking-limited. The `SHORTY_K` sweep is in the
+notebook; the cold column will not move much, since 144 labels are easy to shortlist.
