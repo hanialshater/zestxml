@@ -1,3 +1,226 @@
+# ZestXML: results
+
+Section 0 is the synthesis of everything measured. Everything after it is the
+chronological record, kept intact including the runs whose conclusions were later
+reversed -- the reversals are listed in 0.5.
+
+---
+
+# 0. Summary: what was tested, what held, what did not
+
+Everything below was measured in this repository. Sections after this one are the
+chronological record, including the runs that produced conclusions later reversed; this is
+the synthesis. Where a number here disagrees with prose further down, this section wins and
+the reversal is named explicitly under *Conclusions that were wrong*.
+
+Two bodies of work:
+
+1. **XMC**, on GZ-NPM (3223 labels, 286 unseen) and GZ-Reuters-90 (90 labels, 15 unseen),
+   plus one standard benchmark, AmazonCat-13K.
+2. **ZestXML against SASRec**, on ml-1m and Amazon Video_Games, framed as XMC.
+
+---
+
+## 1. The port
+
+The C++ implementation is reimplemented in PyTorch (`zestxml/`), with a clear API
+(`ZestXML(data_dir, res_dir, **options)`), CSR primitives on torch tensors, and GPU support.
+It reproduces the reference numbers on GZ-NPM exactly (P@1 73.04, unseen 52.11).
+
+On **AmazonCat-13K** (1.19M train, 306K test, 13330 labels, no zero-shot split):
+
+| run | pattern nnz | test shortlist recall | P@1 | P@5 | PSP@5 |
+|---|---|---|---|---|---|
+| title only | 11.2M | 82.05 | 76.53 | — | — |
+| title + `--content` | 270.4M | 92.46 | **93.41** | 64.29 | 72.15 |
+
+The title-only run was mis-specified rather than weak: AmazonCat-13K's published numbers use
+the product description, and `-Titles-` is a *different* dataset. Feeding the description
+lifts P@1 by 16.9 points. **The comparison band remains unverified** — the figures
+circulating for this dataset came from a web search, not a paper anyone here read, and every
+source that would settle it is unreachable from this sandbox. 93.41 is plausible for a
+sparse linear model against transformer methods; plausible is not checked.
+
+Training is not bit-reproducible above `num_thread=1` (torch CPU reduction order); metric
+noise is about 0.011, up to 6e-2 in raw bilinear scores. Treat differences below ~0.1 P@1 as
+nothing.
+
+## 2. XMC: the two things that worked
+
+**Pattern pruning — the largest overall gain measured anywhere here.** `-prune_vectors` /
+`-prune_min_sim` drop mined `(xf, yf)` pairs whose feature names are semantically unrelated.
+On GZ-NPM, keeping 73% of the pattern:
+
+| min_sim | P@1 | seen P@1 | unseen P@1 |
+|---|---|---|---|
+| 0.00 | 73.02 | 74.95 | 52.07 |
+| **0.30** | **74.57** | **76.56** | 52.13 |
+
+**+1.55 P@1, +1.61 seen, unseen unchanged** — so it makes the model better, not more
+zero-shot. It loses on Reuters, and the reason is scale: `bs_count` keeps the top-k label
+features per point feature by co-occurrence alone, and on a large sparse label space many of
+those slots go to pairs that co-occur without being related. Pruning frees budget spent on
+noise. Reuters mines 284K entries over 90 labels and the budget never binds. The sweep had
+not found its optimum at 0.30.
+
+**Label feature-bag expansion — the only large zero-shot gain, and its sign is predictable.**
+Widening each label's feature bag with GloVe neighbours (k=2, cosine floor 0.7):
+
+| dataset | unseen P@1 | delta |
+|---|---|---|
+| GZ-Reuters-90 | 61.28 -> **69.74** | **+8.5** |
+| GZ-NPM | — | **-7.3** |
+
+The sign is decided by how widely the added features are *shared*, not by coverage. A
+neighbour token that lands on a handful of labels sharpens; one that lands on hundreds
+blurs. GloVe beat MiniLM by 6.4 points of unseen P@1 at the same settings and CLIP was worse
+than no expansion at all — almost certainly a *threshold* result rather than an encoder
+result, since transformer embedding spaces are anisotropic and a cosine floor tuned on GloVe
+is permissive on MiniLM.
+
+## 3. XMC: what did not work, and why
+
+**Retrieval is not the binding constraint.** Confirmed four independent ways. Handing the
+model 12.5–15 extra points of unseen shortlist recall produced *zero* unseen P@1, including
+after closing the train/test mismatch by regenerating both shortlists and retraining from
+scratch. The explanation consistent with every arm: 99.09% of npm's and 100% of Reuters'
+unseen-label tokens are already in `Xf`, so an exact lexical link already fires for
+essentially every unseen label. A semantic channel can only add a fuzzier version of a link
+that already exists in its sharpest form, and the labels it newly retrieves are ones the
+exact channel already considered and correctly declined.
+
+**RQ-KMeans semantic IDs are neutral-to-negative in every form tried** — as peer features at
+any mass, as prefix tuples, as multi-code assignments, as concatenated blocks, and with
+transformer encoders on both sides. Two mechanisms, both measured: marginals are too coarse
+to rank, tuples are too sparse to fire (+2.5 recall against marginals' +10.1). More code
+mass monotonically costs unseen accuracy.
+
+**Structured hard pursuit over semantic-ID prefix blocks** (`zestxml/pursuit.py`): block
+masking with ancestor closure and gradient-driven revival, implemented properly and working
+mechanically. On GZ-NPM it beats the unpruned control but **loses to the one-shot cosine
+prune already in the repo** (73.72 against 74.59) *at lower sparsity*, so the selection is
+worse, not the budget. The tell that it is not the structure doing the work: the degenerate
+`xf x prefix` mode — 257634 blocks over 284540 slots, 1.1 each, where block pruning and
+entry pruning are the same operation — scored best of the pursuit arms.
+
+**Per-label classifiers score exactly zero on unseen labels**, as they must. BM25 with no
+training at all matches ZestXML's unseen P@1 on Reuters.
+
+**EMMETT / IRENE** (KDD'24, synthesizing an unseen label's classifier from similar seen
+ones): the mechanism works — one-vs-all goes from the tie-break floor to 27.96 unseen P@1
+through the learned generator, and the generator earns +13.1 PSP@5 over mean synthesis on
+the tail. But **synthesis does not beat the trivial baseline on unseen labels**: keeping
+classifiers where they exist and falling back to the encoder where they do not reaches
+42.19, above the full method's 41.25. All the unseen accuracy comes from the encoder term.
+What synthesis buys is head and tail accuracy.
+
+## 4. ZestXML against SASRec
+
+Framed as XMC: a point is a user, its labels are the set of items touched in the next
+`horizon` steps, metrics are P@k / nDCG@k / PSP@k. SASRec keeps its next-item training
+signal; only the evaluation is shared. `sasrec+content` adds a learned linear map from the
+*same* tf-idf text ZestXML reads, so the cold column is a baseline and not a strawman.
+`random` and `popularity` rows are mandatory: group metrics mask labels, so the cold row
+asks "rank the N cold items" and has a floor well above zero.
+
+**Amazon Video_Games** (8/20-core, 2885 items, 4000 evaluated, 5% cold):
+
+| model | all P@1 | head P@1 | tail P@1 | **cold P@1** | **cold PSP@5** |
+|---|---|---|---|---|---|
+| random | 0.10 | 0.32 | 0.00 | 0.46 | 2.60 |
+| popularity | 1.70 | 2.20 | 0.09 | 0.31 | 3.03 |
+| zestxml | 3.05 | 4.31 | 2.04 | **4.92** | **14.31** |
+| **sasrec** | **4.10** | **5.67** | 2.57 | 0.46 | 3.18 |
+| sasrec+content | 3.88 | 5.57 | **2.78** | 0.77 | 4.77 |
+
+**The trade, demonstrated.** SASRec wins every column with training signal behind it.
+ZestXML wins cold by **6.4x on P@1 and 3.0x on PSP@5** against the strongest baseline, and
+10.7x against chance. Plain SASRec sits exactly at the random floor there, which is what a
+model with untrained embeddings for those items should do.
+
+**Content projection is not a substitute for scoring through the label's own words.**
+`sasrec+content` buys the tail (2.78, the best tail number in the table) and almost nothing
+on cold (0.77 against 4.92). A map trained on warm items transfers to rare ones; it does not
+manufacture a representation for an item the encoder has never seen.
+
+**The deciding variable is text discriminativeness, and it is measurable.** `profile()`
+reports, for the average item, how many other items share its title tokens:
+
+| dataset | items | interactions/item | tokens shared with | cold outcome |
+|---|---|---|---|---|
+| ml-1m | 3706 | 255.6 | **448.8** | everything at the floor |
+| Amazon (first, broken) | 13722 | 1.6 | **3812.3** | everything at the floor |
+| Amazon Video_Games | 2885 | 49.1 | **151.4** | ZestXML 6.4x |
+
+On ml-1m the average movie shares its title tokens with 449 others — three genre words and a
+name — so the feature bag carries no identity and only the per-label identity feature
+discriminates, which is exactly what a cold item lacks. **Read this line before reading any
+table.** Interactions per item in the tens, under-10 share below ~20%, token sharing in the
+tens rather than the hundreds.
+
+## 5. Conclusions that were wrong, and the corrections
+
+Recorded because each one survived a first glance.
+
+* **"ZestXML owns the cold column" (ml-1m, next-item framing).** Plain SASRec scored exactly
+  0.00 there against ZestXML's 1.34, which looked decisive. Under XMC group-masked metrics
+  the same run gives ZestXML 1.07 and `sasrec+content` 1.91 — and the random floor is 0.31,
+  so **both were within ~3x of chance**. The 0.00 was an artifact of asking "surface a cold
+  item against 3706", which has a floor of zero for untrained embeddings. Corrected twice: to
+  "SASRec wins cold", then to "nobody wins cold on ml-1m".
+* **"Codes encode theme, not identity."** Recorded from one example (`cotton`/`corn` sharing
+  3 of 4 levels). Did not survive re-fitting — sklearn's KMeans is not bit-reproducible here
+  — and a proper probe said close to the opposite: 87 labels occupy 80–85 distinct 4-tuples.
+* **"The identity is in the conjunction, so emit prefix tuples."** Followed from the probe
+  and was refuted by measurement, not argument: tuples fire far less often than marginals
+  and more mass makes it worse.
+* **"Co-occurrence was already choosing the right pairs."** Drawn from Reuters alone. Wrong
+  on any label space large enough for the pattern budget to bind — on npm, pruning is the
+  biggest win in the repo.
+* **Three unverifiable download URLs shipped** (a guessed Drive id, an archive.org pattern, a
+  dataset absent from the mirror), and a reference band printed next to the wrong dataset.
+  Both now marked unverified rather than presented as fact.
+* **A stale `seen_labels.txt`** shared between datasets made a whole npm run report P@1 52.15
+  against a true 73.04 — Reuters' 75 ids are valid indices into npm's 3223, so nothing
+  complained, and shortlist recall matched the reference *exactly*. The pipeline now rejects
+  a seen-labels cache that disagrees with `trn_X_Y`.
+* **The first Amazon run was uninterpretable** for four harness reasons at once: catalogue
+  derived from users read rather than users that survived the length filter, no k-core,
+  generic category tokens appended to every title, and a cold fraction that swallowed 73% of
+  the test signal. Every arm sat at the noise floor, which reads as a result.
+
+The pattern in all of these: a number that looks like a finding is usually a harness
+property. The controls that caught them — `random`, `popularity`, `profile()`, shortlist
+recall, derived-set validation — cost little and are now default.
+
+## 6. What this implies for interest mining at scale
+
+The target setting is roughly 10M customers, 15k interests, ~2% labelled (~133 positives per
+label), with an open and growing interest vocabulary.
+
+* **Neither method alone is right.** SASRec-style scoring wins wherever an interest has
+  history; ZestXML's text channel wins where it does not, by 6.4x, and the open vocabulary
+  means the cold case is not a rare corner but continuous inflow.
+* **Fuse them, and tune the fusion on a label-holdout split.** An earlier attempt at score
+  fusion failed for a structural reason — weights tuned on a normal validation split cannot
+  see the unseen regime they are meant to govern.
+* **Expect the text channel to matter more than these numbers suggest.** Interest names are
+  short, meaningful and comparatively discriminative; 133 positives per label is far sparser
+  than Amazon Video_Games' 49 interactions per item.
+* **Spend effort on the pattern, not on semantic IDs.** Pruning is worth +1.55 P@1 and the
+  sweep was still climbing. Every semantic-ID variant tried — eight of them — was
+  neutral-to-negative.
+* **Measure `profile()` on your own data first.** If interest names share their tokens with
+  hundreds of other interests, the text channel will not fire and none of the cold-start
+  result transfers.
+
+Open and worth doing, in order: raise `shorty_k` until test shortlist recall plateaus (it was
+48.61% on Amazon and 48.88% on ml-1m, so the warm columns are retrieval-capped and the
+overall gap is partly artificial); a label-holdout fusion of the two scorers; the prune sweep
+past min_sim 0.30 on npm; and a verified AmazonCat-13K reference table.
+
+---
+
 # Baseline sweep vs. the ZestXML PyTorch port (GZ-NPM, GZ-Reuters-90)
 
 Six experiment agents, all reporting `status: ok`. Every headline number below was
